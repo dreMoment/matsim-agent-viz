@@ -1,0 +1,9 @@
+# generated pages and run data
+*.html
+!page.html
+*.xml
+*.xml.gz
+*.csv.gz
+__pycache__/
+.venv/
+.DS_Store

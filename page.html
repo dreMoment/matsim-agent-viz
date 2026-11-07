@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__ · MATSim</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<style>
+  :root { --ink: #16181d; --muted: #737882; --faint: #a9adb5; --line: rgba(0,0,0,.07); --panel: rgba(255,255,255,.86); }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #f2f2f0; color: var(--ink);
+    font: 13px/1.4 Inter, system-ui, -apple-system, sans-serif; font-feature-settings: "tnum" 1, "cv11" 1; }
+  #map { position: absolute; inset: 0; }
+  .glass { background: rgba(255,255,255,.95); border: 1px solid var(--line); box-shadow: 0 6px 24px rgba(0,0,0,.08); }
+  .panel { position: absolute; left: 16px; top: 16px; z-index: 2; width: 268px; padding: 16px 16px 12px; border-radius: 14px;
+    transition: opacity .25s, transform .25s; }
+  .panel, .badge { user-select: none; -webkit-user-select: none; }
+  .panel.hidden { opacity: 0; transform: translateY(-6px); pointer-events: none; }
+  .eyebrow { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  .clock { font-size: 36px; font-weight: 650; letter-spacing: -.025em; line-height: 1.05; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .moving { color: var(--muted); font-size: 12px; margin-top: 3px; }
+  .moving b { color: var(--ink); font-weight: 600; }
+
+  .transport { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
+  .play { flex: none; width: 32px; height: 32px; border-radius: 50%; border: 0; background: var(--ink); color: #fff;
+    display: grid; place-items: center; cursor: pointer; transition: transform .1s; }
+  .play:hover { transform: scale(1.06); }
+  .play svg { width: 12px; height: 12px; fill: currentColor; }
+  .track { flex: 1; position: relative; padding-top: 2px; }
+  .ticks { position: absolute; left: 8px; right: 8px; top: 14px; height: 4px; pointer-events: none; }
+  .ticks i { position: absolute; top: 0; width: 1px; height: 3px; background: #b5b9c0; }
+  .ticks i.major { height: 5px; background: #8a8f98; }
+  .hours { position: relative; height: 12px; margin: 10px 8px 0; }
+  .hours span { position: absolute; transform: translateX(-50%); font-size: 10.5px; color: #7d828b; }
+  input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 4px; border-radius: 2px; margin: 0;
+    position: relative; z-index: 1; background: linear-gradient(to right, var(--ink) var(--p, 0%), #dfe1e5 var(--p, 0%)); cursor: pointer; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 16px; height: 16px; border-radius: 50%;
+    background: #fff; border: 2.5px solid var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.2); }
+  input[type=range]::-moz-range-thumb { box-sizing: border-box; width: 16px; height: 16px; border-radius: 50%; background: #fff; border: 2.5px solid var(--ink); box-shadow: 0 1px 3px rgba(0,0,0,.2); }
+
+  .seg { display: flex; background: #eceef1; border-radius: 8px; padding: 2px; gap: 2px; }
+  .seg button { flex: 1; border: 0; background: transparent; font: inherit; font-size: 11.5px; color: var(--muted);
+    padding: 3px 6px; border-radius: 6px; cursor: pointer; white-space: nowrap; }
+  .seg button:hover { color: var(--ink); }
+  .seg button.on { background: #fff; color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+  .speedrow { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+  .speedrow .label, .speedrow .unit { font-size: 11px; color: var(--muted); flex: none; }
+  .speedrow .label { width: 32px; }
+  .speedrow .unit { width: 30px; text-align: right; }
+  .speedrow .seg { flex: 1; }
+  .speedrow .seg button { flex: 1 1 0; padding: 3px 0; }
+
+  .divider { height: 1px; background: var(--line); margin: 14px -16px 12px; }
+  .legend-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .mode { width: calc(100% + 16px); border: 0; background: none; font: inherit; color: inherit; text-align: left; display: grid; grid-template-columns: 12px 1fr auto; column-gap: 10px; align-items: center;
+    margin: 0 -8px; padding: 3px 8px; border-radius: 7px; cursor: pointer; user-select: none; transition: background .12s; }
+  .mode:hover { background: rgba(0,0,0,.045); }
+  .mode:focus-visible, .seg button:focus-visible, .play:focus-visible { outline: 2px solid #2a5bd7; outline-offset: 1px; }
+  .mode .sw { width: 10px; height: 10px; border-radius: 50%; justify-self: center; transition: all .15s; }
+  .mode .name, .mode .count { transition: opacity .15s; }
+  .mode.off .name, .mode.off .count { opacity: .38; }
+  .mode.off .sw { background: transparent !important; box-shadow: inset 0 0 0 1.5px var(--faint); }
+  .mode .count { color: var(--muted); font-size: 11.5px; }
+  #modes.mono .mode { grid-template-columns: 0 1fr auto; column-gap: 0; }
+  #modes.mono .mode .sw { width: 0 !important; height: 0 !important; }
+  #modes.mono .mode.off .name { text-decoration: line-through; }
+
+  .foot { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); font-size: 10.5px; color: var(--muted); }
+  .foot-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .note { color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .help { border: 0; background: none; padding: 0; cursor: pointer; }
+  .keys.open { display: grid; }
+  .keys { margin-top: 8px; display: none; grid-template-columns: 40px 1fr 40px 1fr; gap: 6px 6px; align-items: center; }
+  kbd { font: inherit; font-size: 10px; min-width: 18px; text-align: center; justify-self: start; padding: 0 4px;
+    border: 1px solid #d9dce1; border-bottom-width: 2px; border-radius: 4px; background: #fff; color: var(--ink); }
+
+  .badge { position: absolute; left: 16px; top: 16px; z-index: 1; padding: 14px 20px; border-radius: 14px;
+    display: grid; grid-template-columns: auto auto; column-gap: 22px; align-items: center;
+    opacity: 0; transform: translateY(-6px); transition: opacity .25s, transform .25s; pointer-events: none; }
+  .badge.show { opacity: 1; transform: none; }
+  .badge .clock { font-size: 40px; margin: 2px 0 0; }
+  .badge .eyebrow { font-size: 11px; }
+  .badge .moving { margin-top: 1px; font-size: 12px; }
+  .badge .state { margin-top: 2px; font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 5px; }
+  .badge .state i { width: 6px; height: 6px; border-radius: 50%; background: #1fa463; }
+  .badge .state.paused i { background: var(--faint); }
+  .badge .state em { font-style: normal; color: var(--faint); }
+  .badge .keynote { grid-template-rows: repeat(2, auto); }
+  .badge .key { display: none; grid-auto-flow: column; grid-template-rows: repeat(4, auto); gap: 5px 20px; font-size: 13px; color: var(--ink);
+    padding-left: 20px; border-left: 1px solid var(--line); }
+  .badge .key.on { display: grid; }
+  .badge .key span { display: inline-flex; align-items: center; gap: 5px; }
+  .badge .key i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .maplibregl-ctrl-attrib { font-size: 10px; background: rgba(255,255,255,.6) !important; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div class="badge glass" id="badge">
+  <div>
+    <div class="eyebrow">__EYEBROW__</div>
+    <div class="clock" id="badgeClock">--:--</div>
+    <div class="moving" id="badgeMoving">&nbsp;</div>
+    <div class="state" id="badgeState"><i></i><span></span><em>· H for controls</em></div>
+  </div>
+  <div class="key" id="badgeKey"></div>
+  <div class="key keynote" id="badgeNote"><span><i style="background:var(--ink)"></i>car · PT · bike</span><span><i style="background:#6f747c;width:8px;height:8px"></i>walking</span></div>
+</div>
+
+<div class="panel glass" id="panel">
+  <div class="eyebrow">__EYEBROW__</div>
+  <div class="clock" id="clock">--:--</div>
+  <div class="moving" id="moving">&nbsp;</div>
+
+  <div class="transport">
+    <button class="play" id="play" title="Play / pause (Space)" aria-label="Play or pause"></button>
+    <div class="track">
+      <div class="ticks" id="ticks"></div>
+      <input type="range" id="slider" step="60" aria-label="Time of day">
+      <div class="hours" id="hours"></div>
+    </div>
+  </div>
+  <div class="speedrow">
+    <span class="label" title="Simulated minutes per second">Speed</span>
+    <div class="seg" id="speed"></div>
+    <span class="unit">min/s</span>
+  </div>
+  <div class="speedrow">
+    <span class="label">Dots</span>
+    <div class="seg" id="colourSeg">
+      <button data-v="0" class="on">Black</button><button data-v="1">By mode</button>
+    </div>
+    <span class="unit"></span>
+  </div>
+
+  <div class="divider"></div>
+  <div class="legend-head">
+    <span class="eyebrow">Modes</span>
+    <span class="eyebrow" title="Number of legs per mode in the sample">Legs</span>
+  </div>
+  <div id="modes"></div>
+
+  <div class="foot">
+    <div class="foot-row"><span class="note">__NOTE__ · click a mode to hide it</span>
+      <button class="help" id="help" title="Keyboard shortcuts"><kbd>?</kbd></button></div>
+    <div class="keys" id="keys">
+      <kbd>Space</kbd><span>play / pause</span><kbd>← →</kbd><span>±5 min</span>
+      <kbd>1–4</kbd><span>speed</span><kbd>H</kbd><span>hide panel</span>
+      <kbd>L</kbd><span>street names</span><kbd>Ctrl</kbd><span>+ drag to tilt</span>
+    </div>
+  </div>
+</div>
+<script>
+const DATA = __DATA__;
+
+// ---------- modes: fixed names, colours and sizes so a mode looks the same in every run.
+// Walking is the largest group, so it gets quiet greys and smaller dots; the strong hues go to the modes people compare.
+const MODE_STYLE = {
+  car:           ['Car',              '#e4572e', 1],
+  car_passenger: ['Car passenger',    '#f59e0b', 1],
+  pt:            ['Public transport', '#2a5bd7', 1],
+  bike:          ['Bike',             '#119a52', 1],
+  publibike:     ['PubliBike',        '#d6409f', 1],
+  truck:         ['Truck',            '#8a5a2e', 1.15],
+  outside:       ['Outside area',     '#a16ae8', 0.9, 0.9],
+  walk:          ['Walk',             '#7b818b', 0.75, 0.8],
+  walk_loop:     ['Walk (loop)',      '#aab0b8', 0.75, 0.8],
+  remote_walk:   ['Access walk',      '#b9bec5', 0.7, 0.8],
+};
+const BLACK_WALK = '#6f747c';
+const EXTRA = ['#0f766e', '#ca8a04', '#4338ca', '#9f1239', '#65a30d'];
+let extra = 0;
+const pretty = m => m.replace(/[_:]+/g, ' ').replace(/^./, c => c.toUpperCase());
+const modes = DATA.modes.map(m => {
+  const [name, colour, size = 1, alpha = 1] = MODE_STYLE[m] || [pretty(m), EXTRA[extra++ % EXTRA.length]];
+  return { id: m, name, colour, size, alpha, walking: /walk/.test(m), shown: true, count: 0 };
+});
+
+const legs = DATA.legs.map(([m, t, x, y]) => ({ m, t, x: x.map(v => v / 1e5), y: y.map(v => v / 1e5) }));
+legs.forEach(l => modes[l.m].count++);
+const order = modes.map((_, i) => i).sort((a, b) => modes[b].count - modes[a].count);
+const tMin = legs.length ? legs[0].t[0] : 0;
+const tMax = legs.reduce((a, l) => Math.max(a, l.t[l.t.length - 1]), 0);
+const hhmm = s => `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor(s % 3600 / 60)).padStart(2, '0')}`;
+
+// ---------- time slider with hour ticks every 3 hours
+const slider = document.getElementById('slider');
+slider.min = 0; slider.max = Math.max(86400, Math.ceil(tMax / 10800) * 10800);
+const span = slider.max - slider.min;
+{
+  let ticks = '', hours = '';
+  for (let s = +slider.min; s <= +slider.max; s += 10800) {
+    const left = ((s - slider.min) / span * 100) + '%';
+    const major = s % 21600 === 0;
+    ticks += `<i class="${major ? 'major' : ''}" style="left:${left}"></i>`;
+    if (major) hours += `<span style="left:${left}">${String(Math.floor(s / 3600)).padStart(2, '0')}</span>`;
+  }
+  document.getElementById('ticks').innerHTML = ticks;
+  document.getElementById('hours').innerHTML = hours;
+}
+
+// ---------- legend
+let byMode = false;
+const modesEl = document.getElementById('modes');
+for (const i of order) {
+  const md = modes[i];
+  const row = md.row = document.createElement('button');
+  row.className = 'mode';
+  row.setAttribute('aria-pressed', 'true');
+  const d = Math.round(10 * Math.min(md.size, 1.1));
+  row.innerHTML = `<span class="sw" style="background:${md.colour};width:${d}px;height:${d}px"></span>
+    <span class="name">${md.name}</span><span class="count" title="legs in the sample">${md.count.toLocaleString()}</span>`;
+  row.onclick = () => { md.shown = !md.shown; drawModes(); dirty = true; };
+  modesEl.appendChild(row);
+}
+function drawModes() {
+  modesEl.classList.toggle('mono', !byMode);
+  for (const md of modes) {
+    md.row.classList.toggle('off', !md.shown);
+    md.row.setAttribute('aria-pressed', String(md.shown));
+    md.row.title = md.shown ? `Click to hide ${md.name}` : `Click to show ${md.name}`;
+  }
+  // compact legend for the presentation badge: colour mode only, walking left out
+  const key = document.getElementById('badgeKey');
+  key.classList.toggle('on', byMode);
+  document.getElementById('badgeNote').classList.toggle('on', !byMode);
+  const KEY_ORDER = ['car', 'car_passenger', 'truck', 'pt', 'bike', 'publibike', 'outside', 'walk'];
+  const rank = md => { const k = KEY_ORDER.indexOf(md.id); return k < 0 ? 50 + md.count * -1e-9 : k; };
+  key.innerHTML = modes.slice().sort((a, b) => rank(a) - rank(b))
+    .filter(md => md.shown && md.id !== 'walk_loop' && md.id !== 'remote_walk')
+    .map(md => `<span><i style="background:${md.colour}"></i>${md.name}</span>`).join('');
+}
+drawModes();
+document.querySelectorAll('#colourSeg button').forEach(b => b.onclick = () => {
+  byMode = b.dataset.v === '1';
+  document.querySelectorAll('#colourSeg button').forEach(x => x.classList.toggle('on', x === b));
+  drawModes(); dirty = true;
+});
+
+// ---------- speed
+let stateReady = false;
+const SPEEDS = [60, 240, 900, 1800];
+let speed = 240;
+const speedEl = document.getElementById('speed');
+function drawSpeed() {
+  speedEl.innerHTML = SPEEDS.map((v, i) =>
+    `<button data-v="${v}" class="${v === speed ? 'on' : ''}" title="${v / 60} simulated minutes per second (key ${i + 1})">${v / 60}</button>`).join('');
+  speedEl.querySelectorAll('button').forEach(b => b.onclick = () => { speed = +b.dataset.v; drawSpeed(); });
+  if (stateReady) drawState();
+}
+drawSpeed();
+
+// ---------- play / pause, keys
+const playBtn = document.getElementById('play');
+const ICON_PLAY = '<svg viewBox="0 0 12 12"><path d="M2.5 1.2v9.6L10.5 6z"/></svg>';
+const ICON_PAUSE = '<svg viewBox="0 0 12 12"><rect x="2" y="1.5" width="3" height="9" rx=".8"/><rect x="7" y="1.5" width="3" height="9" rx=".8"/></svg>';
+let playing = true;
+const badgeState = document.getElementById('badgeState');
+const setPlaying = p => { playing = p; playBtn.innerHTML = p ? ICON_PAUSE : ICON_PLAY; drawState(); };
+function drawState() {
+  badgeState.classList.toggle('paused', !playing);
+  badgeState.querySelector('span').textContent = playing ? `playing · ${speed / 60} min/s` : 'paused';
+}
+stateReady = true;
+addEventListener('click', e => { const b = e.target.closest('button'); if (b && e.detail) b.blur(); });
+setPlaying(true);
+playBtn.onclick = () => setPlaying(!playing);
+
+let t = Math.max(tMin, 7 * 3600), dirty = true;
+slider.oninput = () => { t = +slider.value; dirty = true; };
+
+const panel = document.getElementById('panel'), badge = document.getElementById('badge');
+document.getElementById('help').onclick = () => document.getElementById('keys').classList.toggle('open');
+let labelsOn = false;
+addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing); }
+  else if (e.key === 'ArrowLeft') { e.preventDefault(); t = Math.max(+slider.min, t - 300); dirty = true; }
+  else if (e.key === 'ArrowRight') { e.preventDefault(); t = Math.min(+slider.max, t + 300); dirty = true; }
+  else if (e.key >= '1' && e.key <= '4') { speed = SPEEDS[+e.key - 1]; drawSpeed(); }
+  else if (e.key === 'h' || e.key === 'H' || (e.key === 'Escape' && panel.classList.contains('hidden'))) {
+    const hide = !panel.classList.contains('hidden');
+    panel.classList.toggle('hidden', hide); badge.classList.toggle('show', hide); panel.inert = hide;
+    map.easeTo({ padding: { left: hide ? 0 : 300, top: 0, right: 0, bottom: 0 }, duration: 400 });
+  }
+  else if (e.key === 'l' || e.key === 'L') { labelsOn = !labelsOn; setLabels(); }
+  else if (e.key === '?') { document.getElementById('keys').classList.toggle('open'); }
+});
+
+// ---------- map
+const map = new maplibregl.Map({
+  container: 'map',
+  style: 'https://tiles.openfreemap.org/styles/positron',
+  center: DATA.centre, zoom: 13.9, pitch: 62, bearing: -15,
+  maxPitch: 80, attributionControl: { compact: true },
+});
+map.setPadding({ left: 300, top: 0, right: 0, bottom: 0 });
+const DEM = { type: 'raster-dem', tiles: ['https://tiles.mapterhorn.com/{z}/{x}/{y}.webp'],
+  tileSize: 512, encoding: 'terrarium', maxzoom: 14, attribution: '© Mapterhorn' };
+
+let symbolLayers = [];
+function setLabels() {
+  for (const id of symbolLayers) map.setLayoutProperty(id, 'visibility', labelsOn ? 'visible' : 'none');
+}
+
+map.on('load', () => {
+  const layers = map.getStyle().layers;
+  const firstLabel = layers.find(l => l.type === 'symbol')?.id;
+
+  // quieter labels: drop shields, POIs, airports and small places; soften the rest
+  for (const l of layers) {
+    if (l.type !== 'symbol') continue;
+    if (/shield|poi|aerodrome|airport|housenum|oneway|village|hamlet|place_other|isolated/i.test(l.id)) {
+      map.setLayoutProperty(l.id, 'visibility', 'none'); continue;
+    }
+    const place = /place|city|town|suburb|country|state/i.test(l.id);
+    if (!place) symbolLayers.push(l.id);
+    try {
+      map.setPaintProperty(l.id, 'text-color', place ? '#6b7079' : '#a3a7ae');
+      map.setPaintProperty(l.id, 'text-halo-color', 'rgba(255,255,255,.85)');
+      if (!place) map.setPaintProperty(l.id, 'text-opacity', 0.75);
+    } catch (e) { /* layer without text */ }
+  }
+
+  setLabels();
+
+  // terrain and soft hillshading
+  map.addSource('dem', DEM);
+  map.addSource('dem-shade', DEM);
+  map.addLayer({ id: 'hillshade', type: 'hillshade', source: 'dem-shade',
+    paint: { 'hillshade-exaggeration': 0.7, 'hillshade-shadow-color': '#8a8f98',
+             'hillshade-highlight-color': '#ffffff', 'hillshade-accent-color': '#c2c5ca' } }, firstLabel);
+  map.setTerrain({ source: 'dem', exaggeration: 1.2 });
+  try {
+    map.setSky({ 'sky-color': '#e4e9f0', 'horizon-color': '#f5f5f3', 'fog-color': '#f2f2f0',
+      'sky-horizon-blend': 0.6, 'horizon-fog-blend': 0.8, 'fog-ground-blend': 0.5 });
+  } catch (e) { /* older MapLibre */ }
+
+  // 3D buildings
+  if (map.getLayer('building')) map.setLayoutProperty('building', 'visibility', 'none');
+  map.addLayer({ id: 'buildings-3d', type: 'fill-extrusion', source: 'openmaptiles', 'source-layer': 'building',
+    minzoom: 12.5, paint: {
+      'fill-extrusion-color': ['interpolate', ['linear'], ['coalesce', ['get', 'render_height'], 8], 0, '#e3e3e0', 30, '#d6d7d9', 80, '#c4c7cc'],
+      'fill-extrusion-height': ['coalesce', ['get', 'render_height'], 8],
+      'fill-extrusion-base': ['coalesce', ['get', 'render_min_height'], 0],
+      'fill-extrusion-opacity': 0.9, 'fill-extrusion-vertical-gradient': true } }, firstLabel);
+  map.setLight({ anchor: 'viewport', position: [1.3, 210, 40], intensity: 0.38 });
+  for (const l of layers) if (l.type === 'fill' && /park|wood|forest|grass|landcover|landuse_park/.test(l.id))
+    try { map.setPaintProperty(l.id, 'fill-color', '#e3e8e0'); } catch (e) {}
+  for (const l of layers) if (l.type === 'fill' && /water/.test(l.id)) map.setPaintProperty(l.id, 'fill-color', '#cfd8e3');
+
+  // agents on top of everything
+  map.addSource('agents', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({ id: 'agents', type: 'circle', source: 'agents', paint: {
+    'circle-radius': ['interpolate', ['linear'], ['zoom'],
+      11, ['*', 2.1, ['get', 's']], 13.5, ['*', 3.3, ['get', 's']], 16, ['*', 5.2, ['get', 's']]],
+    'circle-color': ['get', 'c'], 'circle-opacity': ['get', 'a'],
+    'circle-stroke-color': ['get', 'k'], 'circle-stroke-width': ['get', 'w'], 'circle-stroke-opacity': ['get', 'a'],
+    'circle-pitch-alignment': 'viewport', 'circle-pitch-scale': 'map' } });
+
+  requestAnimationFrame(frame);
+});
+
+function positionAt(l, t) {
+  const ts = l.t;
+  let lo = 0, hi = ts.length - 1;
+  while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (ts[mid] <= t) lo = mid; else hi = mid; }
+  const sp = ts[hi] - ts[lo];
+  const f = sp > 0 ? Math.min(1, Math.max(0, (t - ts[lo]) / sp)) : 0;
+  return [l.x[lo] + (l.x[hi] - l.x[lo]) * f, l.y[lo] + (l.y[hi] - l.y[lo]) * f];
+}
+
+const clockEls = [document.getElementById('clock'), document.getElementById('badgeClock')];
+const movingEls = [document.getElementById('moving'), document.getElementById('badgeMoving')];
+let last = performance.now(), lastPush = 0;
+function frame(now) {
+  if (playing) { t += (now - last) / 1000 * speed; if (t > +slider.max) t = +slider.min; dirty = true; }
+  last = now;
+  if (dirty && now - lastPush > 50) {  // update dots ~20 times per second
+    lastPush = now; dirty = false;
+    const features = [];
+    for (const l of legs) {
+      if (l.t[0] > t) break;  // legs are sorted by start time
+      const md = modes[l.m];
+      if (l.t[l.t.length - 1] < t || !md.shown) continue;
+      features.push({ type: 'Feature',
+        properties: byMode ? { c: md.colour, s: md.size * 1.1, a: md.alpha, k: 'rgba(255,255,255,.85)', w: 0.8 }
+                           : { c: md.walking ? BLACK_WALK : '#16181d', s: md.walking ? 0.7 : md.size, a: md.walking ? 0.85 : 0.92, k: 'rgba(255,255,255,.9)', w: md.walking ? 0.8 : 0.6 },
+        geometry: { type: 'Point', coordinates: positionAt(l, t) } });
+    }
+    map.getSource('agents').setData({ type: 'FeatureCollection', features });
+    clockEls.forEach(e => e.textContent = hhmm(t));
+    movingEls.forEach(e => e.innerHTML = `<b>${features.length.toLocaleString()}</b> agents moving`);
+    if (document.activeElement !== slider) slider.value = t;
+    slider.style.setProperty('--p', ((t - slider.min) / span * 100) + '%');
+  }
+  requestAnimationFrame(frame);
+}
+</script>
+</body>
+</html>
