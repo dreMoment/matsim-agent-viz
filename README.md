@@ -42,13 +42,15 @@ It never reads the population, facilities or households files.
 
 ## In the page
 
-- **Panel**: play/pause, a 24 h timeline, speed (1/4/15/30 simulated min per second) and the dot style (Black / By mode). Click a mode to hide it.
+- **Panel**: play/pause, a 24 h timeline, speed (1/4/15/30 simulated min per second), the dot style (Black / By mode) and trip lines (Lines / Off). Click a mode to hide it.
+- **Trip lines**: each leg in progress that is routed through the network (car, PT and other network modes) shows its whole path from start to end as a faint line, with the part already travelled drawn stronger. Teleported legs (walk, bike, …) get no line.
 - **Keys**:
   - `Space` play/pause
   - `←` `→` ±5 min
   - `1`–`4` speed
   - `H` presentation mode (`Esc` also leaves it)
   - `L` street names
+  - `T` trip lines
   - `?` help
 - **Camera**: drag to pan; right-drag or Ctrl-drag to tilt and rotate.
 

@@ -191,10 +191,12 @@ def build_legs(events: Path, sample: float, link_from, link_mid, stops):
     n_events = 0
     started = time.time()
 
-    def add(person, t, xy):
+    def add(person, t, xy, routed=False):
         leg = open_leg.get(person)
         if leg is None or xy is None:
             return
+        if routed:
+            leg["routed"] = True
         pts = leg["pts"]
         if pts and t - pts[-1][0] < MIN_POINT_GAP_S and len(pts) > 1:
             pts[-1] = (t, *xy)
@@ -246,13 +248,13 @@ def build_legs(events: Path, sample: float, link_from, link_mid, stops):
             if veh in riders:
                 xy = link_from.get(el.get("link"))
                 for p in riders[veh]:
-                    add(p, t, xy)
+                    add(p, t, xy, routed=True)
         elif typ in ("VehicleArrivesAtFacility", "VehicleDepartsAtFacility"):
             veh = el.get("vehicle")
             if veh in riders:
                 xy = stops.get(el.get("facility"))
                 for p in riders[veh]:
-                    add(p, t, xy)
+                    add(p, t, xy, routed=True)
         elif typ == "arrival":
             if sampled(person) and person in open_leg:
                 leg = open_leg.pop(person)
@@ -292,7 +294,8 @@ def to_payload(legs, crs: CRS):
         lons, lats = tf.transform(xs, ys)
         lon_i = [round(v * 1e5) for v in lons]
         lat_i = [round(v * 1e5) for v in lats]
-        out.append([mode_idx[leg["mode"]], [round(v) for v in ts], lon_i, lat_i])
+        routed = 1 if leg.get("routed") else 0  # moved through network links or transit stops, not teleported
+        out.append([mode_idx[leg["mode"]], [round(v) for v in ts], lon_i, lat_i, routed])
         starts_lon.append(lons[0]); starts_lat.append(lats[0])
     out.sort(key=lambda r: r[1][0])
     # initial view: close in on the median leg start, where 3D buildings show

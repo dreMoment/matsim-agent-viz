@@ -136,6 +136,13 @@
     </div>
     <span class="unit"></span>
   </div>
+  <div class="speedrow">
+    <span class="label" title="Path of each leg in progress that is routed through the network (T)">Trips</span>
+    <div class="seg" id="tripSeg">
+      <button data-v="1" class="on">Lines</button><button data-v="0">Off</button>
+    </div>
+    <span class="unit"></span>
+  </div>
 
   <div class="divider"></div>
   <div class="legend-head">
@@ -150,7 +157,8 @@
     <div class="keys" id="keys">
       <kbd>Space</kbd><span>play / pause</span><kbd>← →</kbd><span>±5 min</span>
       <kbd>1–4</kbd><span>speed</span><kbd>H</kbd><span>hide panel</span>
-      <kbd>L</kbd><span>street names</span><kbd>Ctrl</kbd><span>+ drag to tilt</span>
+      <kbd>L</kbd><span>street names</span><kbd>T</kbd><span>trip lines</span>
+      <kbd>Ctrl</kbd><span>+ drag to tilt</span>
     </div>
   </div>
 </div>
@@ -180,7 +188,7 @@ const modes = DATA.modes.map(m => {
   return { id: m, name, colour, size, alpha, walking: /walk/.test(m), shown: true, count: 0 };
 });
 
-const legs = DATA.legs.map(([m, t, x, y]) => ({ m, t, x: x.map(v => v / 1e5), y: y.map(v => v / 1e5) }));
+const legs = DATA.legs.map(([m, t, x, y, r]) => ({ m, t, x: x.map(v => v / 1e5), y: y.map(v => v / 1e5), routed: r === 1 }));
 legs.forEach(l => modes[l.m].count++);
 const order = modes.map((_, i) => i).sort((a, b) => modes[b].count - modes[a].count);
 const tMin = legs.length ? legs[0].t[0] : 0;
@@ -241,6 +249,15 @@ document.querySelectorAll('#colourSeg button').forEach(b => b.onclick = () => {
   drawModes(); dirty = true;
 });
 
+// ---------- trip lines: the whole path of each network-routed leg in progress (not teleported), the part already travelled stronger
+let tripsOn = true;
+function setTrips(on) {
+  tripsOn = on;
+  document.querySelectorAll('#tripSeg button').forEach(x => x.classList.toggle('on', (x.dataset.v === '1') === on));
+  dirty = true;
+}
+document.querySelectorAll('#tripSeg button').forEach(b => b.onclick = () => setTrips(b.dataset.v === '1'));
+
 // ---------- speed
 let stateReady = false;
 const SPEEDS = [60, 240, 900, 1800];
@@ -288,6 +305,7 @@ addEventListener('keydown', e => {
     map.easeTo({ padding: { left: hide ? 0 : 300, top: 0, right: 0, bottom: 0 }, duration: 400 });
   }
   else if (e.key === 'l' || e.key === 'L') { labelsOn = !labelsOn; setLabels(); }
+  else if (e.key === 't' || e.key === 'T') { setTrips(!tripsOn); }
   else if (e.key === '?') { document.getElementById('keys').classList.toggle('open'); }
 });
 
@@ -353,6 +371,13 @@ map.on('load', () => {
     try { map.setPaintProperty(l.id, 'fill-color', '#e3e8e0'); } catch (e) {}
   for (const l of layers) if (l.type === 'fill' && /water/.test(l.id)) map.setPaintProperty(l.id, 'fill-color', '#cfd8e3');
 
+  // trip lines under the dots
+  map.addSource('trips', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  map.addLayer({ id: 'trips', type: 'line', source: 'trips',
+    layout: { 'line-cap': 'round', 'line-join': 'round' },
+    paint: { 'line-color': ['get', 'c'], 'line-opacity': ['get', 'a'],
+      'line-width': ['interpolate', ['linear'], ['zoom'], 11, ['*', 0.6, ['get', 'w']], 16, ['*', 1.6, ['get', 'w']]] } });
+
   // agents on top of everything
   map.addSource('agents', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
   map.addLayer({ id: 'agents', type: 'circle', source: 'agents', paint: {
@@ -365,14 +390,16 @@ map.on('load', () => {
   requestAnimationFrame(frame);
 });
 
+// position at time t, and the index of the last point already passed
 function positionAt(l, t) {
   const ts = l.t;
   let lo = 0, hi = ts.length - 1;
   while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (ts[mid] <= t) lo = mid; else hi = mid; }
   const sp = ts[hi] - ts[lo];
   const f = sp > 0 ? Math.min(1, Math.max(0, (t - ts[lo]) / sp)) : 0;
-  return [l.x[lo] + (l.x[hi] - l.x[lo]) * f, l.y[lo] + (l.y[hi] - l.y[lo]) * f];
+  return [[l.x[lo] + (l.x[hi] - l.x[lo]) * f, l.y[lo] + (l.y[hi] - l.y[lo]) * f], lo];
 }
+const path = (l, from, to) => { const c = []; for (let i = from; i <= to; i++) c.push([l.x[i], l.y[i]]); return c; };
 
 const clockEls = [document.getElementById('clock'), document.getElementById('badgeClock')];
 const movingEls = [document.getElementById('moving'), document.getElementById('badgeMoving')];
@@ -382,17 +409,28 @@ function frame(now) {
   last = now;
   if (dirty && now - lastPush > 50) {  // update dots ~20 times per second
     lastPush = now; dirty = false;
-    const features = [];
+    const features = [], lines = [];
     for (const l of legs) {
       if (l.t[0] > t) break;  // legs are sorted by start time
       const md = modes[l.m];
       if (l.t[l.t.length - 1] < t || !md.shown) continue;
+      const [xy, lo] = positionAt(l, t);
+      const c = byMode ? md.colour : (md.walking ? BLACK_WALK : '#16181d');
       features.push({ type: 'Feature',
-        properties: byMode ? { c: md.colour, s: md.size * 1.1, a: md.alpha, k: 'rgba(255,255,255,.85)', w: 0.8 }
-                           : { c: md.walking ? BLACK_WALK : '#16181d', s: md.walking ? 0.7 : md.size, a: md.walking ? 0.85 : 0.92, k: 'rgba(255,255,255,.9)', w: md.walking ? 0.8 : 0.6 },
-        geometry: { type: 'Point', coordinates: positionAt(l, t) } });
+        properties: byMode ? { c, s: md.size * 1.1, a: md.alpha, k: 'rgba(255,255,255,.85)', w: 0.8 }
+                           : { c, s: md.walking ? 0.7 : md.size, a: md.walking ? 0.85 : 0.92, k: 'rgba(255,255,255,.9)', w: md.walking ? 0.8 : 0.6 },
+        geometry: { type: 'Point', coordinates: xy } });
+      if (tripsOn && l.routed) {
+        const w = md.walking ? 0.7 : 1;
+        lines.push({ type: 'Feature', properties: { c, a: byMode ? 0.22 : 0.14, w },
+          geometry: { type: 'LineString', coordinates: path(l, 0, l.x.length - 1) } });
+        const done = path(l, 0, lo); done.push(xy);
+        lines.push({ type: 'Feature', properties: { c, a: byMode ? 0.6 : 0.42, w: w * 1.3 },
+          geometry: { type: 'LineString', coordinates: done } });
+      }
     }
     map.getSource('agents').setData({ type: 'FeatureCollection', features });
+    map.getSource('trips').setData({ type: 'FeatureCollection', features: lines });
     clockEls.forEach(e => e.textContent = hhmm(t));
     movingEls.forEach(e => e.innerHTML = `<b>${features.length.toLocaleString()}</b> agents moving`);
     if (document.activeElement !== slider) slider.value = t;
