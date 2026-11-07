@@ -9,31 +9,44 @@ One Python script reads the run's final outputs and writes a single HTML page. T
 Needs [uv](https://docs.astral.sh/uv/). It installs the only dependency, `pyproj`.
 
 ```sh
-# build the page and open it in the browser
-uv run matsim_agent_viz.py --run-dir path/to/simulation_output --open
-
-# open an existing page again without rebuilding
-uv run matsim_agent_viz.py --run-dir path/to/simulation_output --view
+uv run matsim_agent_viz.py
 ```
 
-The page is written to `agents_3d.html` in the run folder (change this with `--out`). `--open` and `--view` serve it on `127.0.0.1` only. Opening the file directly fails in some viewers (Quick Look, editor previews) because they block WebGL.
+This opens a launcher in your browser. Click **Choose…** to pick the run's output folder in the Finder dialog, or paste its path. The launcher shows which input files it found, and you can swap any of them. Pick the share of agents, then **Build and open**. When the page is ready it opens in the same tab. **Open last page** shows a page you built before, with no rebuild. The launcher remembers your last folder, file swaps, sample, title and coordinate system in `~/.config/matsim-agent-viz/launcher.json` (paths and settings only, no run data).
+
+From the command line:
+
+```sh
+# build the page and open it
+uv run matsim_agent_viz.py path/to/simulation_output
+
+# open the existing page again, no rebuild
+uv run matsim_agent_viz.py path/to/simulation_output --view
+```
+
+The page is written to `agents_3d.html` in the run folder (change this with `--out`). Everything is served on `127.0.0.1` only (port 8765 if it is free). Opening the HTML file directly fails in some viewers (Quick Look, editor previews) because they block WebGL. Stop the server with Ctrl-C or the launcher's **Quit**.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--run-dir` | required | MATSim output folder |
+| `run_dir` | none: opens the launcher | MATSim output folder |
 | `--out` | `<run-dir>/agents_3d.html` | HTML file to write |
 | `--sample` | `0.1` | share of agents to show (stable hash of the person id) |
 | `--title` | from the folder name | scenario name on the page |
 | `--crs` | from `output_config.xml` | e.g. `EPSG:2056`, if the config doesn't set one (an LV95/LV03 guess is the fallback) |
+| `--events`, `--network`, `--schedule`, `--config` | found in the run folder | use a file from somewhere else |
+| `--view` | | open the existing page, no rebuild |
+| `--no-open` | | only write the page |
 
 A full Zurich 10% run (49 M events) takes about 2.5 minutes. With `--sample 0.1` the page is about 34 MB.
 
 ## What it reads
 
-- `output_events.xml.gz`: movements of the final iteration
-- `output_network.xml.gz`: link coordinates
-- `output_transitSchedule.xml.gz`: stop coordinates
-- `output_config.xml`: coordinate system and last iteration number
+Plain or `.gz`, with or without a run-id prefix (`myrun.output_events.xml.gz`):
+
+- `output_events.xml.gz` (required): movements of the final iteration
+- `output_network.xml.gz` (required): link coordinates
+- `output_transitSchedule.xml.gz` (optional): stop coordinates. Without it, PT riders follow the network links only.
+- `output_config.xml` (optional): coordinate system and last iteration number. Without it, the coordinate system is guessed from the network (Swiss grids) or taken from `--crs`.
 
 It never reads the population, facilities or households files.
 
@@ -60,10 +73,11 @@ It never reads the population, facilities or households files.
 
 ```sh
 uv run examples/make_fake_run.py /tmp/fake_run
-uv run matsim_agent_viz.py --run-dir /tmp/fake_run --sample 1 --open
+uv run matsim_agent_viz.py /tmp/fake_run --sample 1
 ```
 
 ## Files
 
 - `matsim_agent_viz.py`: reads the run and writes the page
+- `launcher.html`: the launcher page (folder and file picker, build progress)
 - `page.html`: the page template. `__DATA__`, `__TITLE__`, `__EYEBROW__` and `__NOTE__` are filled in by the script.
