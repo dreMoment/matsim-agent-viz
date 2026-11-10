@@ -149,7 +149,13 @@ for t1, pid, leg_no, a, b, t0, sa, sb in sorted(plans):
         E(t2+30, "departure", person=pid, link=lb, legMode="walk")
         t = t2 + 30 + max(60, md(B, b) * D)
     else:
-        E(t1, "sharing vehicle pickup failed", person=pid, service="publibike", link=la, station=f"st{sa}")
+        # like the contrib: the failed event names the nearest station that still has a bike (where the
+        # agent would try next), not the empty one; with no bike anywhere there is no event
+        spare = [k for k in range(len(BIKE_STATIONS)) if stock[k]]
+        if spare:
+            k = min(spare, key=lambda k: md(A, BIKE_STATIONS[k])); K = BIKE_STATIONS[k]
+            E(t1, "sharing vehicle pickup failed", person=pid, service="publibike",
+              link=links[(K[0], K[1], K[0]+1, K[1])], station=f"st{k}")
         E(t1+30, "actend", person=pid, link=la, actType="sharing pickup interaction", **xy(*A))
         E(t1+30, "departure", person=pid, link=la, legMode="walk")
         t = t1 + 30 + max(60, md(A, b) * D)

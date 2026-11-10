@@ -121,6 +121,7 @@ let sample = 0.1;
 let running = false;     // a build is in progress: inputs are locked
 let stopped = false;     // the local server is gone
 let checkSeq = 0;        // drops /api/check answers that arrive after the folder changed again
+let autoSharing = null;  // the sharing file the selected config points to; one the user picked is kept
 let saveTimer = null, pendingSave = null;
 
 const mb = n => n == null ? "" : n >= 1e9 ? (n / 1e9).toFixed(1) + " GB" : n >= 1e6 ? (n / 1e6).toFixed(0) + " MB" : Math.max(1, Math.round(n / 1e3)) + " kB";
@@ -215,6 +216,7 @@ async function check(dir, restore) {
   current = res;
   $("dir").value = res.dir;
   files = Object.fromEntries(Object.entries(res.files).map(([k, f]) => [k, f.path]));
+  autoSharing = files.sharing;
   if (restore && restore.dir === res.dir) {
     Object.assign(files, restore.files || {});
     $("title").value = restore.title || "";
@@ -228,15 +230,18 @@ async function check(dir, restore) {
   save();
 }
 
-// The coordinate-system hint follows whichever config file is selected.
+// The coordinate-system hint and the sharing station file follow whichever config file is selected.
 async function refreshCrs() {
   const cfg = files.config;
-  let crs = current.crs;
-  if (cfg && cfg !== current.files.config.path) {
-    const res = await api("/api/crs?config=" + encodeURIComponent(cfg));
-    if (!res || !current || files.config !== cfg) return;
-    crs = res.crs;
+  let crs = current.crs, sharing = current.files.sharing.path;
+  if (cfg !== current.files.config.path) {
+    const res = cfg && await api(`/api/crs?dir=${encodeURIComponent(current.dir)}&config=${encodeURIComponent(cfg)}`);
+    if ((cfg && !res) || !current || files.config !== cfg) return;
+    crs = res ? res.crs : null;
+    sharing = res ? res.sharing : null;
   }
+  if (files.sharing === autoSharing && sharing !== autoSharing) { files.sharing = sharing; renderFiles(); }
+  autoSharing = sharing;
   $("crs").placeholder = crs ? `${crs} (from config)`
     : cfg ? "not set in config: guessed from the network" : "guessed from the network (Swiss grids)";
 }

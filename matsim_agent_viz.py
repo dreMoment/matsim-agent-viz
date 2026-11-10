@@ -59,6 +59,7 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 import zlib
+from collections import Counter
 from html import escape
 from pathlib import Path
 
@@ -106,11 +107,16 @@ def locate(run_dir: Path, name: str) -> Path | None:
 
 def find_inputs(run_dir: Path) -> dict[str, Path | None]:
     files = {role: locate(run_dir, name) for role, (name, _, _) in INPUTS.items() if role != "sharing"}
-    try:
-        files["sharing"] = locate_sharing(run_dir, files["config"])
-    except SystemExit:  # config is not readable XML: the build will say so
-        files["sharing"] = None
+    files["sharing"] = sharing_for(run_dir, files["config"])
     return files
+
+
+def sharing_for(run_dir: Path, config: Path | None) -> Path | None:
+    """The station file a config points to, or None (also when the config is not readable XML)."""
+    try:
+        return locate_sharing(run_dir, config) if config is None or config.is_file() else None
+    except SystemExit:  # the build will say what is wrong with the config
+        return None
 
 
 def read_sharing_services(config: Path | None) -> list[dict]:
@@ -124,19 +130,27 @@ def read_sharing_services(config: Path | None) -> list[dict]:
     return services
 
 
+def station_services(config: Path | None) -> list[dict]:
+    """The station-based services in the config (free-floating ones have no stations to draw)."""
+    return [s for s in read_sharing_services(config) if s.get("serviceScheme", "").lower() != "freefloating"]
+
+
+def service_file(run_dir: Path, config: Path, svc: dict) -> Path | None:
+    """Where a service's file is. The path is relative to the original config, which is not in the
+    output folder, so it is looked up in the run folder, next to the config and in the folder above."""
+    p = Path(svc.get("serviceInputFile") or "")
+    if not p.name:
+        return None
+    cands = [p] if p.is_absolute() else [run_dir / p, config.parent / p, run_dir.parent / p]
+    cands += [run_dir / p.name, run_dir.parent / p.name]
+    return next((c for c in cands if c.is_file()), None)
+
+
 def locate_sharing(run_dir: Path, config: Path | None) -> Path | None:
-    """The station-based service file a config points to. The path is relative to the original
-    config, so it is looked up next to the run folder, the config and the folder above."""
-    for svc in read_sharing_services(config):
-        value = svc.get("serviceInputFile")
-        if not value or svc.get("serviceScheme", "").lower() == "freefloating":
-            continue
-        p = Path(value)
-        cands = [p] if p.is_absolute() else [run_dir / p, config.parent / p, run_dir.parent / p]
-        cands += [run_dir / p.name, run_dir.parent / p.name]
-        for c in cands:
-            if c.is_file():
-                return c
+    """The file of the first station-based service in the config that can be found, or None."""
+    for svc in station_services(config):
+        if (path := service_file(run_dir, config, svc)) is not None:
+            return path
     return None
 
 
@@ -238,9 +252,10 @@ def read_network(path: Path):
     return link_from, link_mid
 
 
-def read_sharing_stations(path: Path, config: Path | None, link_mid):
-    """Stations, their start fleet and the service id from a shared_mobility service file, or None."""
-    ids, xy, n0, by_id, by_link = [], [], [], {}, {}
+def read_sharing_stations(path: Path, run_dir: Path, config: Path | None, link_mid):
+    """Stations, their start fleet and the service from a shared_mobility service file, or None."""
+    ids, xy, by_id, by_link = [], [], {}, {}
+    fleet = Counter()  # bikes per start station; vehicles may be listed before the stations
     skipped = 0
     for el in iter_elements(path, {"station", "vehicle"}, "Reading sharing stations"):
         if el.tag == "station":
@@ -249,21 +264,31 @@ def read_sharing_stations(path: Path, config: Path | None, link_mid):
                 skipped += 1
                 continue
             by_id[el.get("id")] = by_link[el.get("link")] = len(ids)
-            ids.append(el.get("id")); xy.append(pos); n0.append(0)
-        elif (s := by_id.get(el.get("startStation"))) is not None:
-            n0[s] += 1
+            ids.append(el.get("id")); xy.append(pos)
+        elif el.get("startStation"):
+            fleet[el.get("startStation")] += 1
     if not ids:
-        say(f"note: {path.name} has no stations on this network, no station layer")
+        say(f"note: {path.name} has no stations on this network (a free-floating service?), no station layer")
         return None
     if skipped:
         say(f"note: {skipped} sharing stations are on links missing from the network and are left out")
-    # Which service in the config this file belongs to: events name it in their "service" attribute.
+    # Which service this file belongs to. Events name it in their "service" attribute.
     services = read_sharing_services(config)
-    match = [s for s in services if Path(s["serviceInputFile"]).name == path.name] or \
-            (services if len(services) == 1 else [])
+    stations = [s for s in services if s.get("serviceScheme", "").lower() != "freefloating"]
+    match = [s for s in stations if (f := service_file(run_dir, config, s)) and f.resolve() == path.resolve()]
+    if not match:
+        same_name = [s for s in stations if Path(s.get("serviceInputFile") or "").name == path.name]
+        match = same_name if len(same_name) == 1 else stations if len(stations) == 1 else []
     svc = match[0] if match else {}
-    return {"ids": ids, "xy": xy, "n0": n0, "by_id": by_id, "by_link": by_link,
-            "service": svc.get("id"), "mode": svc.get("mode") or svc.get("id")}
+    if svc and len(stations) > 1:
+        say(f"note: {len(stations)} station-based sharing services in the config, showing '{svc.get('id')}'")
+    if not svc and services:
+        say(f"note: cannot tell which sharing service {path.name} belongs to; "
+            "events of the services named in the config are left out")
+    return {"ids": ids, "xy": xy, "n0": [fleet[i] for i in ids], "by_id": by_id, "by_link": by_link,
+            "service": svc.get("id"), "mode": svc.get("mode"),
+            # with no service identified, skip the events of every service the config names
+            "skip": set() if svc else {s.get("id") for s in services}}
 
 
 def read_stops(path: Path):
@@ -277,6 +302,9 @@ def read_stops(path: Path):
 # shared_mobility contrib events -> kind in the page (0 pickup, 1 dropoff, 2 failed pickup, 3 failed dropoff)
 SHARING_EVENTS = {"sharing vehicle pickup": 0, "sharing vehicle dropoff": 1,
                   "sharing vehicle pickup failed": 2, "sharing vehicle dropoff failed": 3}
+# The contrib's pickup and dropoff activities. A failed event names the station the agent is sent to
+# next, so the station that failed is the one of the activity the agent is at.
+SHARING_ACTS = {"sharing pickup interaction", "sharing dropoff interaction"}
 
 
 def build_legs(events: Path, sample: float, link_from, link_mid, stops, sharing=None):
@@ -295,6 +323,7 @@ def build_legs(events: Path, sample: float, link_from, link_mid, stops, sharing=
     legs = []
     n_events = 0
     started = time.time()
+    at_station = {}    # person -> link of the sharing pickup/dropoff activity they are at (all persons)
     if sharing is not None:
         sharing["ev"] = []
 
@@ -372,6 +401,8 @@ def build_legs(events: Path, sample: float, link_from, link_mid, stops, sharing=
                 if end is not None:
                     pos[person] = end
         elif typ == "actstart":
+            if sharing is not None and el.get("actType") in SHARING_ACTS:
+                at_station[person] = el.get("link")
             if sampled(person):
                 xy = act_xy(el)
                 leg = pending.get(person)
@@ -382,11 +413,22 @@ def build_legs(events: Path, sample: float, link_from, link_mid, stops, sharing=
                 if xy is not None:
                     pos[person] = xy
         elif typ in SHARING_EVENTS:
-            if sharing is not None and (sharing["service"] is None or el.get("service") == sharing["service"]):
-                station = el.get("station")
-                s = sharing["by_id"].get(station) if station else sharing["by_link"].get(el.get("link"))
-                if s is not None:
-                    sharing["ev"].append((round(t), s, SHARING_EVENTS[typ]))
+            if sharing is None:
+                continue
+            svc = el.get("service")
+            other = svc != sharing["service"] if sharing["service"] is not None else svc in sharing["skip"]
+            if other:  # another service's event
+                continue
+            kind = SHARING_EVENTS[typ]
+            here = at_station.pop(person, None)
+            if kind >= 2:  # failed: the event names the next station to try, so use where the agent is
+                s = sharing["by_link"].get(here)
+            elif el.get("station"):
+                s = sharing["by_id"].get(el.get("station"))
+            else:
+                s = sharing["by_link"].get(el.get("link"))
+            if s is not None:
+                sharing["ev"].append((round(t), s, kind))
 
     for person in list(pending):
         finish(person)
@@ -467,7 +509,7 @@ def build(run_dir: Path, files: dict[str, Path | None], out: Path, sample: float
     sharing = None
     if sharing_file is not None:
         say("reading sharing stations ...")
-        sharing = read_sharing_stations(sharing_file, config, link_mid)
+        sharing = read_sharing_stations(sharing_file, run_dir, config, link_mid)
     say("reading events (this can take a few minutes) ...")
     legs, n_events = build_legs(events, sample, link_from, link_mid, stops, sharing)
     if not legs:
@@ -491,7 +533,7 @@ def build(run_dir: Path, files: dict[str, Path | None], out: Path, sample: float
     if sharing is not None:
         kinds = [k for _, _, k in sharing["ev"]]
         say(f"sharing: {len(sharing['ids']):,} stations, {kinds.count(0):,} pickups, "
-            f"{kinds.count(2):,} failed pickups")
+            f"{kinds.count(2):,} failed pickups, {kinds.count(3):,} failed dropoffs")
     say(f"wrote {out} ({size_mb:.1f} MB).")
     if size_mb > 60:
         say("note: the page is large and may load slowly. Try a sample of 5%.")
@@ -528,6 +570,8 @@ def main():
         fail(f"run folder {run_dir} not found.")
     files = find_inputs(run_dir)
     files.update({role: getattr(args, role) for role in INPUTS if getattr(args, role)})
+    if args.config and not args.sharing:  # the sharing file comes from whichever config is used
+        files["sharing"] = sharing_for(run_dir, args.config)
     build(run_dir, files, out, args.sample, args.title, args.crs)
     if args.no_open:
         print("To watch it later without rebuilding, add --view.")
@@ -673,8 +717,11 @@ def serve(page: Path | None = None):
                 return self.reply(check_dir(Path(parse_qs(url.query).get("dir", [""])[0]).expanduser()))
             if url.path == "/api/settings":
                 return self.reply(load_settings())
-            if url.path == "/api/crs":
-                return self.reply({"crs": config_crs(Path(parse_qs(url.query).get("config", [""])[0]).expanduser())})
+            if url.path == "/api/crs":  # what a config sets: coordinate system and sharing station file
+                q = parse_qs(url.query)
+                cfg = Path(q.get("config", [""])[0]).expanduser()
+                sharing = sharing_for(Path(q.get("dir", [""])[0]).expanduser(), cfg)
+                return self.reply({"crs": config_crs(cfg), "sharing": str(sharing) if sharing else None})
             if url.path == "/api/status":
                 p = state["page"]
                 done = p and not state["running"] and p.is_file()

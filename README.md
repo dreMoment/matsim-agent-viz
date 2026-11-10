@@ -47,7 +47,7 @@ Plain or `.gz`, with or without a run-id prefix (`myrun.output_events.xml.gz`):
 - `output_network.xml.gz` (required): link coordinates
 - `output_transitSchedule.xml.gz` (optional): stop coordinates. Without it, PT riders follow the network links only.
 - `output_config.xml` (optional): coordinate system (`global.coordinateSystem`) and last iteration number.
-- sharing service file (optional): stations and bikes of a station-based bike-sharing service (shared_mobility contrib), e.g. `publibike_service.xml`. The script follows `serviceInputFile` in the config's `sharing` module and looks for the file in the run folder, next to the config and in the folder above. Otherwise pass it with `--sharing`.
+- sharing service file (optional): stations and bikes of a station-based bike-sharing service (shared_mobility contrib), e.g. `publibike_service.xml`. The script follows `serviceInputFile` in the config's `sharing` module and looks for the file in the run folder, next to the config and in the folder above. Otherwise pass it with `--sharing`. With several station-based services, the first one found is shown; pass `--sharing` to pick another.
 
 It never reads the population, facilities or households files.
 

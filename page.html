@@ -207,7 +207,9 @@ const legs = DATA.legs.map(([m, t, x, y, r]) => ({ m, t, x: x.map(v => v / 1e5),
 legs.forEach(l => modes[l.m].count++);
 const order = modes.map((_, i) => i).sort((a, b) => modes[b].count - modes[a].count);
 const tMin = legs.length ? legs[0].t[0] : 0;
-const tMax = legs.reduce((a, l) => Math.max(a, l.t[l.t.length - 1]), 0);
+// last moment to show: the end of the last leg, or a later station event (counted for all agents, not the sample)
+const tMax = Math.max(legs.reduce((a, l) => Math.max(a, l.t[l.t.length - 1]), 0),
+  DATA.sharing && DATA.sharing.ev.length ? DATA.sharing.ev[DATA.sharing.ev.length - 3] : 0);
 const hhmm = s => `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor(s % 3600 / 60)).padStart(2, '0')}`;
 
 // ---------- time slider with hour ticks every 3 hours
@@ -275,9 +277,13 @@ document.querySelectorAll('#tripSeg button').forEach(b => b.onclick = () => setT
 
 // ---------- bike-sharing stations: bikes per station over time, from the pickup and dropoff events of all agents
 const SH = DATA.sharing || null;
+// The service id names it (e.g. publibike); its mode is the underlying one (often plain bike). The colour
+// follows the service's own style, else the colour its legs or its mode already have on this page.
+const modeColour = id => (MODE_STYLE[id] || [])[1] || modes.find(md => md.id === id)?.colour;
 const sh = SH && {
-  colour: (MODE_STYLE[SH.mode] || [])[1] || '#d6409f',
-  name: (MODE_STYLE[SH.mode] || [])[0] || pretty(SH.service),
+  colour: modeColour(SH.service) || modeColour(SH.mode) || '#d6409f',
+  name: (MODE_STYLE[SH.service] || [])[0] || pretty(SH.service),
+  popup: null,
   x: SH.x.map(v => v / 1e5), y: SH.y.map(v => v / 1e5),
   evT: SH.ev.filter((_, i) => i % 3 === 0), evS: SH.ev.filter((_, i) => i % 3 === 1), evK: SH.ev.filter((_, i) => i % 3 === 2),
   n: SH.n0.slice(), cur: 0, at: -Infinity, on: true,
@@ -294,6 +300,7 @@ function stationsAt(t) {
 function setStations(on) {
   if (!sh) return;
   sh.on = on;
+  if (!on && sh.popup) { sh.popup.remove(); map.getCanvas().style.cursor = ''; }
   document.querySelectorAll('#shSeg button').forEach(x => x.classList.toggle('on', (x.dataset.v === '1') === on));
   for (const id of ['stations', 'stations-fail']) if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', on ? 'visible' : 'none');
   document.getElementById('shHint').style.display = on ? '' : 'none';
@@ -439,14 +446,14 @@ map.on('load', () => {
       'icon-image': ['get', 'img'], 'icon-anchor': 'bottom', 'icon-offset': [0, 6],
       'icon-size': ['interpolate', ['exponential', 1.6], ['zoom'], 10, 0.06, 12, 0.12, 14, 0.28, 16, 0.55, 18, 0.9],  // shrinks when zooming out
       'icon-allow-overlap': true, 'icon-ignore-placement': true, 'icon-pitch-alignment': 'viewport' } });
-    const popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 8 });
+    const popup = sh.popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 8 });
     map.on('mousemove', 'stations', e => {
       const s = e.features[0].properties.s, n = Math.max(0, sh.n[s]), el = document.createElement('div');
       el.textContent = `${sh.name} station ${SH.ids[s]} · ${n} bike${n === 1 ? '' : 's'}`;
       map.getCanvas().style.cursor = 'default';
       popup.setLngLat(e.lngLat).setDOMContent(el).addTo(map);
     });
-    map.on('mouseleave', 'stations', () => popup.remove());
+    map.on('mouseleave', 'stations', () => { popup.remove(); map.getCanvas().style.cursor = ''; });
   }
 
   // agents on top of everything
@@ -523,7 +530,7 @@ function drawStations() {
   document.getElementById('shHint').innerHTML =
     `<span><i style="background:${sh.colour}"></i>${bikes.toLocaleString()} bikes docked</span>` +
     `<span><i style="background:${EMPTY_SIGN}"></i>${empty} of ${sh.n.length} empty</span>` +
-    `<span><i style="border:1.5px solid #dc2626;border-radius:50%"></i>failed pickup</span>`;
+    `<span><i style="border:1.5px solid #dc2626;border-radius:50%"></i>failed pickup/dropoff</span>`;
 }
 
 // position at time t, and the index of the last point already passed
