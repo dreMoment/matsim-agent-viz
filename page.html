@@ -283,11 +283,12 @@ const modeColour = id => (MODE_STYLE[id] || [])[1] || modes.find(md => md.id ===
 const sh = SH && {
   colour: modeColour(SH.service) || modeColour(SH.mode) || '#d6409f',
   name: (MODE_STYLE[SH.service] || [])[0] || pretty(SH.service),
-  popup: null,
+  popup: null, hovered: null,
   x: SH.x.map(v => v / 1e5), y: SH.y.map(v => v / 1e5),
   evT: SH.ev.filter((_, i) => i % 3 === 0), evS: SH.ev.filter((_, i) => i % 3 === 1), evK: SH.ev.filter((_, i) => i % 3 === 2),
   n: SH.n0.slice(), cur: 0, at: -Infinity, on: true,
 };
+const stationLabel = s => { const n = Math.max(0, sh.n[s]); return `${sh.name} station ${SH.ids[s]} · ${n} bike${n === 1 ? '' : 's'}`; };
 // bikes at each station at time t: replay the events from the start when time goes back
 function stationsAt(t) {
   if (t < sh.at) { sh.n = SH.n0.slice(); sh.cur = 0; }
@@ -300,7 +301,7 @@ function stationsAt(t) {
 function setStations(on) {
   if (!sh) return;
   sh.on = on;
-  if (!on && sh.popup) { sh.popup.remove(); map.getCanvas().style.cursor = ''; }
+  if (!on && sh.popup) { sh.hovered = null; sh.popup.remove(); map.getCanvas().style.cursor = ''; }
   document.querySelectorAll('#shSeg button').forEach(x => x.classList.toggle('on', (x.dataset.v === '1') === on));
   for (const id of ['stations', 'stations-fail']) if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', on ? 'visible' : 'none');
   document.getElementById('shHint').style.display = on ? '' : 'none';
@@ -448,12 +449,11 @@ map.on('load', () => {
       'icon-allow-overlap': true, 'icon-ignore-placement': true, 'icon-pitch-alignment': 'viewport' } });
     const popup = sh.popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 8 });
     map.on('mousemove', 'stations', e => {
-      const s = e.features[0].properties.s, n = Math.max(0, sh.n[s]), el = document.createElement('div');
-      el.textContent = `${sh.name} station ${SH.ids[s]} · ${n} bike${n === 1 ? '' : 's'}`;
+      sh.hovered = e.features[0].properties.s;
       map.getCanvas().style.cursor = 'default';
-      popup.setLngLat(e.lngLat).setDOMContent(el).addTo(map);
+      popup.setLngLat(e.lngLat).setText(stationLabel(sh.hovered)).addTo(map);
     });
-    map.on('mouseleave', 'stations', () => { popup.remove(); map.getCanvas().style.cursor = ''; });
+    map.on('mouseleave', 'stations', () => { sh.hovered = null; popup.remove(); map.getCanvas().style.cursor = ''; });
   }
 
   // agents on top of everything
@@ -526,6 +526,7 @@ function drawStations() {
     rings.push({ type: 'Feature', properties: { a, g: 1 + 1.2 * (1 - a) }, geometry: { type: 'Point', coordinates: [sh.x[sh.evS[i]], sh.y[sh.evS[i]]] } });
   }
   map.getSource('stations-fail').setData({ type: 'FeatureCollection', features: rings });
+  if (sh.hovered !== null) sh.popup.setText(stationLabel(sh.hovered));  // keep the hovered count current
   const empty = sh.n.filter(n => n <= 0).length, bikes = sh.n.reduce((a, n) => a + Math.max(0, n), 0);
   document.getElementById('shHint').innerHTML =
     `<span><i style="background:${sh.colour}"></i>${bikes.toLocaleString()} bikes docked</span>` +
