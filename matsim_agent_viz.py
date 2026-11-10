@@ -15,6 +15,8 @@ What it reads (plain or .gz):
   output_network.xml      node coordinates for link events
   output_transitSchedule  stop coordinates for public transport (optional)
   output_config.xml       coordinate system and iteration (optional)
+  sharing service file    bike-sharing stations and bikes (optional), found
+                          through the config's sharing module
 It never reads the population, facilities or households files.
 
 How positions are built:
@@ -44,7 +46,7 @@ Options:
   --title TEXT    scenario name on the page
   --crs EPSG:xxxx coordinate system, if output_config does not set one
   --out FILE      HTML to write (default: agents_3d.html in the run folder)
-  --events/--network/--schedule/--config FILE
+  --events/--network/--schedule/--config/--sharing FILE
                   use this file instead of the one in the run folder
   --no-open       only write the page
 """
@@ -57,6 +59,7 @@ import sys
 import time
 import xml.etree.ElementTree as ET
 import zlib
+from collections import Counter
 from html import escape
 from pathlib import Path
 
@@ -89,6 +92,7 @@ INPUTS = {
     "network": ("output_network.xml", True, "link coordinates"),
     "schedule": ("output_transitSchedule.xml", False, "stop coordinates for public transport"),
     "config": ("output_config.xml", False, "coordinate system and iteration number"),
+    "sharing": ("sharing service file", False, "bike-sharing stations, from the config's sharing module"),
 }
 
 
@@ -102,7 +106,52 @@ def locate(run_dir: Path, name: str) -> Path | None:
 
 
 def find_inputs(run_dir: Path) -> dict[str, Path | None]:
-    return {role: locate(run_dir, name) for role, (name, _, _) in INPUTS.items()}
+    files = {role: locate(run_dir, name) for role, (name, _, _) in INPUTS.items() if role != "sharing"}
+    files["sharing"] = sharing_for(run_dir, files["config"])
+    return files
+
+
+def sharing_for(run_dir: Path, config: Path | None) -> Path | None:
+    """The station file a config points to, or None (also when the config is not readable XML)."""
+    try:
+        return locate_sharing(run_dir, config) if config is None or config.is_file() else None
+    except SystemExit:  # the build will say what is wrong with the config
+        return None
+
+
+def read_sharing_services(config: Path | None) -> list[dict]:
+    """The services in the config's sharing module (shared_mobility contrib), as {param: value}."""
+    services = []
+    if config is not None:
+        for el in iter_elements(config, {"parameterset"}):
+            params = {p.get("name"): (p.get("value") or "").strip() for p in el.findall("param")}
+            if "serviceInputFile" in params:
+                services.append(params)
+    return services
+
+
+def station_services(config: Path | None) -> list[dict]:
+    """The station-based services in the config (free-floating ones have no stations to draw)."""
+    return [s for s in read_sharing_services(config) if s.get("serviceScheme", "").lower() != "freefloating"]
+
+
+def service_file(run_dir: Path, config: Path, svc: dict) -> Path | None:
+    """Where a service's file is. The path is relative to the original config, which is not in the
+    output folder, so it is looked up in the run folder, next to the config and in the folder above."""
+    p = Path(svc.get("serviceInputFile") or "")
+    if not p.name:
+        return None
+    cands = [p] if p.is_absolute() else [run_dir / p, config.parent / p, run_dir.parent / p]
+    cands += [run_dir / p.name, run_dir.parent / p.name]
+    return next((c for c in cands if c.is_file()), None)
+
+
+def locate_sharing(run_dir: Path, config: Path | None) -> Path | None:
+    """The file of the first station-based service in the config that can be found, or None."""
+    for svc in station_services(config):
+        if (path := service_file(run_dir, config, svc)) is not None:
+            return path
+    return None
 
 
 def iter_elements(path: Path, tags: set[str], step: str | None = None):
@@ -203,6 +252,45 @@ def read_network(path: Path):
     return link_from, link_mid
 
 
+def read_sharing_stations(path: Path, run_dir: Path, config: Path | None, link_mid):
+    """Stations, their start fleet and the service from a shared_mobility service file, or None."""
+    ids, xy, by_id, by_link = [], [], {}, {}
+    fleet = Counter()  # bikes per start station; vehicles may be listed before the stations
+    skipped = 0
+    for el in iter_elements(path, {"station", "vehicle"}, "Reading sharing stations"):
+        if el.tag == "station":
+            pos = link_mid.get(el.get("link"))
+            if pos is None:
+                skipped += 1
+                continue
+            by_id[el.get("id")] = by_link[el.get("link")] = len(ids)
+            ids.append(el.get("id")); xy.append(pos)
+        elif el.get("startStation"):
+            fleet[el.get("startStation")] += 1
+    if not ids:
+        say(f"note: {path.name} has no stations on this network (a free-floating service?), no station layer")
+        return None
+    if skipped:
+        say(f"note: {skipped} sharing stations are on links missing from the network and are left out")
+    # Which service this file belongs to. Events name it in their "service" attribute.
+    services = read_sharing_services(config)
+    stations = [s for s in services if s.get("serviceScheme", "").lower() != "freefloating"]
+    match = [s for s in stations if (f := service_file(run_dir, config, s)) and f.resolve() == path.resolve()]
+    if not match:
+        same_name = [s for s in stations if Path(s.get("serviceInputFile") or "").name == path.name]
+        match = same_name if len(same_name) == 1 else stations if len(stations) == 1 else []
+    svc = match[0] if match else {}
+    if svc and len(stations) > 1:
+        say(f"note: {len(stations)} station-based sharing services in the config, showing '{svc.get('id')}'")
+    if not svc and services:
+        say(f"note: cannot tell which sharing service {path.name} belongs to; "
+            "events of the services named in the config are left out")
+    return {"ids": ids, "xy": xy, "n0": [fleet[i] for i in ids], "by_id": by_id, "by_link": by_link,
+            "service": svc.get("id"), "mode": svc.get("mode"),
+            # with no service identified, skip the events of every service the config names
+            "skip": set() if svc else {s.get("id") for s in services}}
+
+
 def read_stops(path: Path):
     stops = {}
     for el in iter_elements(path, {"stopFacility"}, "Reading transit stops"):
@@ -211,7 +299,17 @@ def read_stops(path: Path):
 
 
 # ---------------------------------------------------------------- events
-def build_legs(events: Path, sample: float, link_from, link_mid, stops):
+# shared_mobility contrib events -> kind in the page (0 pickup, 1 dropoff, 2 failed pickup, 3 failed dropoff)
+SHARING_EVENTS = {"sharing vehicle pickup": 0, "sharing vehicle dropoff": 1,
+                  "sharing vehicle pickup failed": 2, "sharing vehicle dropoff failed": 3}
+# The contrib's pickup and dropoff activities. A failed event names the station the agent is sent to
+# next, so the station that failed is the one of the activity the agent is at.
+SHARING_ACTS = {"sharing pickup interaction", "sharing dropoff interaction"}
+
+
+def build_legs(events: Path, sample: float, link_from, link_mid, stops, sharing=None):
+    """Legs of the sampled agents. With `sharing` (stations), also collects every station event
+    of that service into sharing["ev"], for all agents: the page shows only station totals."""
     threshold = int(sample * 10000)
 
     def sampled(person):
@@ -225,6 +323,9 @@ def build_legs(events: Path, sample: float, link_from, link_mid, stops):
     legs = []
     n_events = 0
     started = time.time()
+    at_station = {}    # person -> link of the sharing pickup/dropoff activity they are at (all persons)
+    if sharing is not None:
+        sharing["ev"] = []
 
     def add(person, t, xy, routed=False):
         leg = open_leg.get(person)
@@ -300,6 +401,8 @@ def build_legs(events: Path, sample: float, link_from, link_mid, stops):
                 if end is not None:
                     pos[person] = end
         elif typ == "actstart":
+            if sharing is not None and el.get("actType") in SHARING_ACTS:
+                at_station[person] = el.get("link")
             if sampled(person):
                 xy = act_xy(el)
                 leg = pending.get(person)
@@ -309,6 +412,23 @@ def build_legs(events: Path, sample: float, link_from, link_mid, stops):
                 finish(person)
                 if xy is not None:
                     pos[person] = xy
+        elif typ in SHARING_EVENTS:
+            if sharing is None:
+                continue
+            svc = el.get("service")
+            other = svc != sharing["service"] if sharing["service"] is not None else svc in sharing["skip"]
+            if other:  # another service's event
+                continue
+            kind = SHARING_EVENTS[typ]
+            here = at_station.pop(person, None)
+            if kind >= 2:  # failed: the event names the next station to try, so use where the agent is
+                s = sharing["by_link"].get(here)
+            elif el.get("station"):
+                s = sharing["by_id"].get(el.get("station"))
+            else:
+                s = sharing["by_link"].get(el.get("link"))
+            if s is not None:
+                sharing["ev"].append((round(t), s, kind))
 
     for person in list(pending):
         finish(person)
@@ -318,7 +438,7 @@ def build_legs(events: Path, sample: float, link_from, link_mid, stops):
 
 
 # ---------------------------------------------------------------- output
-def to_payload(legs, crs: CRS):
+def to_payload(legs, crs: CRS, sharing=None):
     tf = Transformer.from_crs(crs, 4326, always_xy=True)
     modes = sorted({leg["mode"] for leg in legs})
     mode_idx = {m: i for i, m in enumerate(modes)}
@@ -336,7 +456,16 @@ def to_payload(legs, crs: CRS):
     # initial view: close in on the median leg start, where 3D buildings show
     starts_lon.sort(); starts_lat.sort()
     centre = [starts_lon[len(starts_lon) // 2], starts_lat[len(starts_lat) // 2]]
-    return {"modes": modes, "legs": out, "centre": centre}
+    payload = {"modes": modes, "legs": out, "centre": centre}
+    if sharing is not None:
+        xs, ys = zip(*sharing["xy"])
+        lons, lats = tf.transform(xs, ys)
+        payload["sharing"] = {
+            "service": sharing["service"] or "sharing", "mode": sharing["mode"], "ids": sharing["ids"],
+            "x": [round(v * 1e5) for v in lons], "y": [round(v * 1e5) for v in lats], "n0": sharing["n0"],
+            "ev": [v for e in sharing["ev"] for v in e],  # flat [t, station, kind, ...], in time order
+        }
+    return payload
 
 
 PAGE = Path(__file__).with_name("page.html")
@@ -358,7 +487,7 @@ def build(run_dir: Path, files: dict[str, Path | None], out: Path, sample: float
             fail(f"missing {name}(.gz) in {run_dir}. Point to the MATSim output folder, or choose the file.")
         if path is not None and not path.is_file():
             fail(f"{path} not found.")
-    events, network, schedule, config = (files.get(role) for role in INPUTS)
+    events, network, schedule, config, sharing_file = (files.get(role) for role in INPUTS)
 
     if crs:
         try:
@@ -377,13 +506,17 @@ def build(run_dir: Path, files: dict[str, Path | None], out: Path, sample: float
     else:
         say("no transit schedule: pt riders follow the network links only")
         stops = {}
+    sharing = None
+    if sharing_file is not None:
+        say("reading sharing stations ...")
+        sharing = read_sharing_stations(sharing_file, run_dir, config, link_mid)
     say("reading events (this can take a few minutes) ...")
-    legs, n_events = build_legs(events, sample, link_from, link_mid, stops)
+    legs, n_events = build_legs(events, sample, link_from, link_mid, stops, sharing)
     if not legs:
         fail("no legs found for the sampled agents. Try a larger sample.")
 
     progress("Writing the page")
-    payload = to_payload(legs, crs_obj)
+    payload = to_payload(legs, crs_obj, sharing)
     title = title or scenario_name(run_dir)
     last_it = read_param(config, "lastIteration")
     eyebrow = f"{title} · " + (f"iteration {last_it}" if last_it else "last iteration")
@@ -397,6 +530,10 @@ def build(run_dir: Path, files: dict[str, Path | None], out: Path, sample: float
     # Counts only. No ids, coordinates or records.
     size_mb = out.stat().st_size / 1e6
     say(f"done: {n_events:,} events read, {len(legs):,} legs drawn across {len(payload['modes'])} modes")
+    if sharing is not None:
+        kinds = [k for _, _, k in sharing["ev"]]
+        say(f"sharing: {len(sharing['ids']):,} stations, {kinds.count(0):,} pickups, "
+            f"{kinds.count(2):,} failed pickups, {kinds.count(3):,} failed dropoffs")
     say(f"wrote {out} ({size_mb:.1f} MB).")
     if size_mb > 60:
         say("note: the page is large and may load slowly. Try a sample of 5%.")
@@ -413,7 +550,7 @@ def main():
     ap.add_argument("--title", help="scenario name shown on the page (default: from the run folder, e.g. 'Zurich 10pct')")
     ap.add_argument("--crs", help="coordinate system of the run, e.g. EPSG:2056 (default: from output_config)")
     for role, (name, _, use) in INPUTS.items():
-        ap.add_argument(f"--{role}", type=Path, help=f"use this file instead of {name}(.gz) in the run folder ({use})")
+        ap.add_argument(f"--{role}", type=Path, help=f"use this file instead of the one found in the run folder ({use})")
     ap.add_argument("--view", action="store_true", help="open the existing page in your browser, no rebuild")
     ap.add_argument("--no-open", action="store_true", help="only write the page, don't open it")
     ap.add_argument("--open", action="store_true", help=argparse.SUPPRESS)  # old flag: opening is the default now
@@ -433,6 +570,8 @@ def main():
         fail(f"run folder {run_dir} not found.")
     files = find_inputs(run_dir)
     files.update({role: getattr(args, role) for role in INPUTS if getattr(args, role)})
+    if args.config and not args.sharing:  # the sharing file comes from whichever config is used
+        files["sharing"] = sharing_for(run_dir, args.config)
     build(run_dir, files, out, args.sample, args.title, args.crs)
     if args.no_open:
         print("To watch it later without rebuilding, add --view.")
@@ -578,8 +717,11 @@ def serve(page: Path | None = None):
                 return self.reply(check_dir(Path(parse_qs(url.query).get("dir", [""])[0]).expanduser()))
             if url.path == "/api/settings":
                 return self.reply(load_settings())
-            if url.path == "/api/crs":
-                return self.reply({"crs": config_crs(Path(parse_qs(url.query).get("config", [""])[0]).expanduser())})
+            if url.path == "/api/crs":  # what a config sets: coordinate system and sharing station file
+                q = parse_qs(url.query)
+                cfg = Path(q.get("config", [""])[0]).expanduser()
+                sharing = sharing_for(Path(q.get("dir", [""])[0]).expanduser(), cfg)
+                return self.reply({"crs": config_crs(cfg), "sharing": str(sharing) if sharing else None})
             if url.path == "/api/status":
                 p = state["page"]
                 done = p and not state["running"] and p.is_file()

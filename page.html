@@ -53,6 +53,11 @@
   .speedrow .seg { flex: 1; }
   .speedrow .seg button { flex: 1 1 0; padding: 3px 0; }
 
+  .shhint { margin: 5px 0 0 42px; font-size: 10.5px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 2px 10px; }
+  .shhint span { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+  .shhint i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; box-sizing: border-box; }
+  .maplibregl-popup-content { font: 12px/1.35 Inter, system-ui, sans-serif; padding: 6px 9px; border-radius: 8px; }
+
   .divider { height: 1px; background: var(--line); margin: 14px -16px 12px; }
   .legend-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
   .mode { width: calc(100% + 16px); border: 0; background: none; font: inherit; color: inherit; text-align: left; display: grid; grid-template-columns: 12px 1fr auto; column-gap: 10px; align-items: center;
@@ -143,6 +148,16 @@
     </div>
     <span class="unit"></span>
   </div>
+  <div id="shBlock" hidden>
+    <div class="speedrow">
+      <span class="label" title="Bike-sharing stations with the bikes docked there. The sign turns grey when a station is empty (S)">Stations</span>
+      <div class="seg" id="shSeg">
+        <button data-v="1" class="on">Show</button><button data-v="0">Off</button>
+      </div>
+      <span class="unit"></span>
+    </div>
+    <div class="shhint" id="shHint"></div>
+  </div>
 
   <div class="divider"></div>
   <div class="legend-head">
@@ -158,7 +173,7 @@
       <kbd>Space</kbd><span>play / pause</span><kbd>← →</kbd><span>±5 min</span>
       <kbd>1–4</kbd><span>speed</span><kbd>H</kbd><span>hide panel</span>
       <kbd>L</kbd><span>street names</span><kbd>T</kbd><span>trip lines</span>
-      <kbd>Ctrl</kbd><span>+ drag to tilt</span>
+      <kbd>Ctrl</kbd><span>+ drag to tilt</span><kbd id="shKey" hidden>S</kbd><span id="shKeyText" hidden>stations</span>
     </div>
   </div>
 </div>
@@ -192,7 +207,9 @@ const legs = DATA.legs.map(([m, t, x, y, r]) => ({ m, t, x: x.map(v => v / 1e5),
 legs.forEach(l => modes[l.m].count++);
 const order = modes.map((_, i) => i).sort((a, b) => modes[b].count - modes[a].count);
 const tMin = legs.length ? legs[0].t[0] : 0;
-const tMax = legs.reduce((a, l) => Math.max(a, l.t[l.t.length - 1]), 0);
+// last moment to show: the end of the last leg, or a later station event (counted for all agents, not the sample)
+const tMax = Math.max(legs.reduce((a, l) => Math.max(a, l.t[l.t.length - 1]), 0),
+  DATA.sharing && DATA.sharing.ev.length ? DATA.sharing.ev[DATA.sharing.ev.length - 3] : 0);
 const hhmm = s => `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor(s % 3600 / 60)).padStart(2, '0')}`;
 
 // ---------- time slider with hour ticks every 3 hours
@@ -258,6 +275,44 @@ function setTrips(on) {
 }
 document.querySelectorAll('#tripSeg button').forEach(b => b.onclick = () => setTrips(b.dataset.v === '1'));
 
+// ---------- bike-sharing stations: bikes per station over time, from the pickup and dropoff events of all agents
+const SH = DATA.sharing || null;
+// The service id names it (e.g. publibike); its mode is the underlying one (often plain bike). The colour
+// follows the service's own style, else the colour its legs or its mode already have on this page.
+const modeColour = id => (MODE_STYLE[id] || [])[1] || modes.find(md => md.id === id)?.colour;
+const sh = SH && {
+  colour: modeColour(SH.service) || modeColour(SH.mode) || '#d6409f',
+  name: (MODE_STYLE[SH.service] || [])[0] || pretty(SH.service),
+  popup: null, hovered: null,
+  x: SH.x.map(v => v / 1e5), y: SH.y.map(v => v / 1e5),
+  evT: SH.ev.filter((_, i) => i % 3 === 0), evS: SH.ev.filter((_, i) => i % 3 === 1), evK: SH.ev.filter((_, i) => i % 3 === 2),
+  n: SH.n0.slice(), cur: 0, at: -Infinity, on: true,
+};
+const stationLabel = s => { const n = Math.max(0, sh.n[s]); return `${sh.name} station ${SH.ids[s]} · ${n} bike${n === 1 ? '' : 's'}`; };
+// bikes at each station at time t: replay the events from the start when time goes back
+function stationsAt(t) {
+  if (t < sh.at) { sh.n = SH.n0.slice(); sh.cur = 0; }
+  for (; sh.cur < sh.evT.length && sh.evT[sh.cur] <= t; sh.cur++) {
+    const k = sh.evK[sh.cur], s = sh.evS[sh.cur];
+    if (k === 0) sh.n[s]--; else if (k === 1) sh.n[s]++;
+  }
+  sh.at = t;
+}
+function setStations(on) {
+  if (!sh) return;
+  sh.on = on;
+  if (!on && sh.popup) { sh.hovered = null; sh.popup.remove(); map.getCanvas().style.cursor = ''; }
+  document.querySelectorAll('#shSeg button').forEach(x => x.classList.toggle('on', (x.dataset.v === '1') === on));
+  for (const id of ['stations', 'stations-fail']) if (map.getLayer(id)) map.setLayoutProperty(id, 'visibility', on ? 'visible' : 'none');
+  document.getElementById('shHint').style.display = on ? '' : 'none';
+  dirty = true;
+}
+if (sh) {
+  document.getElementById('shBlock').hidden = false;
+  document.getElementById('shKey').hidden = document.getElementById('shKeyText').hidden = false;
+  document.querySelectorAll('#shSeg button').forEach(b => b.onclick = () => setStations(b.dataset.v === '1'));
+}
+
 // ---------- speed
 let stateReady = false;
 const SPEEDS = [60, 240, 900, 1800];
@@ -306,6 +361,7 @@ addEventListener('keydown', e => {
   }
   else if (e.key === 'l' || e.key === 'L') { labelsOn = !labelsOn; setLabels(); }
   else if (e.key === 't' || e.key === 'T') { setTrips(!tripsOn); }
+  else if ((e.key === 's' || e.key === 'S') && sh) { setStations(!sh.on); }
   else if (e.key === '?') { document.getElementById('keys').classList.toggle('open'); }
 });
 
@@ -378,6 +434,28 @@ map.on('load', () => {
     paint: { 'line-color': ['get', 'c'], 'line-opacity': ['get', 'a'],
       'line-width': ['interpolate', ['linear'], ['zoom'], 11, ['*', 0.6, ['get', 'w']], 16, ['*', 1.6, ['get', 'w']]] } });
 
+  // bike-sharing stations: isometric icons with the bikes docked there. Sign grey: empty. Red ring on the ground: a failed pickup.
+  if (sh) {
+    map.addSource('stations', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addSource('stations-fail', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    map.addLayer({ id: 'stations-fail', type: 'circle', source: 'stations-fail', paint: {
+      'circle-radius': ['interpolate', ['exponential', 1.6], ['zoom'], 10, ['*', 3, ['get', 'g']], 12, ['*', 5, ['get', 'g']], 14, ['*', 9, ['get', 'g']], 16, ['*', 17, ['get', 'g']], 18, ['*', 28, ['get', 'g']]], 'circle-opacity': 0,
+      'circle-stroke-color': '#dc2626', 'circle-stroke-width': 2.5, 'circle-stroke-opacity': ['get', 'a'],
+      'circle-pitch-alignment': 'map' } });
+    for (let nb = 0; nb <= DOCKS; nb++) map.addImage(`station-${nb}`, stationIcon(nb), { pixelRatio: 2 });
+    map.addLayer({ id: 'stations', type: 'symbol', source: 'stations', layout: {
+      'icon-image': ['get', 'img'], 'icon-anchor': 'bottom', 'icon-offset': [0, 6],
+      'icon-size': ['interpolate', ['exponential', 1.6], ['zoom'], 10, 0.06, 12, 0.12, 14, 0.28, 16, 0.55, 18, 0.9],  // shrinks when zooming out
+      'icon-allow-overlap': true, 'icon-ignore-placement': true, 'icon-pitch-alignment': 'viewport' } });
+    const popup = sh.popup = new maplibregl.Popup({ closeButton: false, closeOnClick: false, offset: 8 });
+    map.on('mousemove', 'stations', e => {
+      sh.hovered = e.features[0].properties.s;
+      map.getCanvas().style.cursor = 'default';
+      popup.setLngLat(e.lngLat).setText(stationLabel(sh.hovered)).addTo(map);
+    });
+    map.on('mouseleave', 'stations', () => { sh.hovered = null; popup.remove(); map.getCanvas().style.cursor = ''; });
+  }
+
   // agents on top of everything
   map.addSource('agents', { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
   map.addLayer({ id: 'agents', type: 'circle', source: 'agents', paint: {
@@ -389,6 +467,72 @@ map.on('load', () => {
 
   requestAnimationFrame(frame);
 });
+
+// A station is an isometric icon: a pad with DOCKS docking posts, the bikes parked in them and a terminal with a
+// sign at the back. Docks fill with the bikes actually there (up to DOCKS); the station keeps one size. The sign is
+// the mode's colour, or grey when the station is empty. One image per bike count, drawn once on a canvas.
+const DOCKS = 5, DARK = '#3f444c', WHEEL = '#2b2f36', EMPTY_SIGN = '#c3c7cd';
+function stationIcon(nb) {
+  const W = 108, H = 94, R = 2, cv = document.createElement('canvas');
+  cv.width = W * R; cv.height = H * R;
+  const g = cv.getContext('2d');
+  g.scale(R, R); g.lineCap = 'round'; g.lineJoin = 'round';
+  const r = [13, -6.5], q = [0.88, 0.47];                    // row direction per dock, and across it (towards you)
+  const L = (i, j = 0) => [12 + i * r[0] + j * q[0], 74 + i * r[1] + j * q[1]];
+  const poly = (pts, fill) => { g.beginPath(); pts.forEach(([x, y], k) => k ? g.lineTo(x, y) : g.moveTo(x, y)); g.closePath(); g.fillStyle = fill; g.fill(); };
+  const line = (a, b, c, w) => { g.beginPath(); g.moveTo(...a); g.lineTo(...b); g.strokeStyle = c; g.lineWidth = w; g.stroke(); };
+  // pad with a soft shadow and a front edge
+  const [p1, p2, p3, p4] = [L(-0.7, -2), L(5.6, -2), L(5.6, 21), L(-0.7, 21)];
+  g.save(); g.shadowColor = 'rgba(0,0,0,.22)'; g.shadowBlur = 6; g.shadowOffsetY = 2;
+  poly([p1, p2, p3, p4], '#d9dce0'); g.restore();
+  poly([p4, p3, [p3[0], p3[1] + 3], [p4[0], p4[1] + 3]], '#a9aeb5');
+  poly([p3, p2, [p2[0], p2[1] + 3], [p3[0], p3[1] + 3]], '#bfc3c9');
+  // terminal and sign at the back
+  const [tx, ty] = L(5.1, 3);
+  poly([[tx - 3.5, ty], [tx + 3.5, ty], [tx + 3.5, ty - 24], [tx - 3.5, ty - 24]], DARK);
+  poly([[tx + 3.5, ty], [tx + 6, ty - 1.4], [tx + 6, ty - 25.4], [tx + 3.5, ty - 24]], '#2c3036');
+  g.beginPath(); g.roundRect(tx - 8, ty - 36, 16, 12, 2.5); g.fillStyle = nb ? sh.colour : EMPTY_SIGN; g.fill();
+  g.beginPath(); g.arc(tx - 3, ty - 28, 2, 0, 7); g.arc(tx + 3, ty - 28, 2, 0, 7); g.strokeStyle = '#fff'; g.lineWidth = 1; g.stroke();
+  // docks from the back to the front, so nearer bikes overlap farther ones
+  for (let i = DOCKS - 1; i >= 0; i--) {
+    const [px, py] = L(i, -0.5);
+    line([px, py], [px, py - 9], DARK, 2.6);
+    if (i >= nb) continue;
+    const F = L(i, 3), B = L(i, 19);                       // front and rear wheel contact points
+    const f = [F[0], F[1] - 5.5], b = [B[0], B[1] - 5.5];  // hubs
+    const at = (t, up) => [f[0] + (b[0] - f[0]) * t, f[1] + (b[1] - f[1]) * t - up];
+    const bb = at(0.55, -1), seat = at(0.72, 9), head = at(0.12, 9);
+    for (const c of [f, b]) { g.beginPath(); g.arc(c[0], c[1], 5.5, 0, 7); g.strokeStyle = WHEEL; g.lineWidth = 1.6; g.stroke(); }
+    for (const [a, z] of [[b, bb], [b, seat], [bb, seat], [bb, head], [seat, head], [head, f]]) line(a, z, sh.colour, 1.8);
+    line(at(0.64, 10.5), at(0.82, 10.5), DARK, 2.2);                                    // saddle
+    line([head[0] - 2.5, head[1] - 1.3], [head[0] + 2.5, head[1] - 3.2], DARK, 1.8);  // handlebar
+  }
+  return g.getImageData(0, 0, W * R, H * R);
+}
+
+// stations at time t, and a ring for each failed pickup or dropoff of the last ~1.5 s on screen
+function drawStations() {
+  stationsAt(t);
+  const docked = sh.n.map(n => Math.min(DOCKS, Math.max(0, n))), sig = docked.join('');
+  if (sig !== sh.sig) {  // update the icons only when the bikes in their docks change
+    sh.sig = sig;
+    map.getSource('stations').setData({ type: 'FeatureCollection', features: docked.map((nb, s) => ({ type: 'Feature',
+      properties: { s, img: `station-${nb}` }, geometry: { type: 'Point', coordinates: [sh.x[s], sh.y[s]] } })) });
+  }
+  const rings = [], win = Math.max(120, speed * 1.5);
+  for (let i = sh.cur - 1; i >= 0 && sh.evT[i] > t - win; i--) {
+    if (sh.evK[i] < 2) continue;
+    const a = 1 - (t - sh.evT[i]) / win;
+    rings.push({ type: 'Feature', properties: { a, g: 1 + 1.2 * (1 - a) }, geometry: { type: 'Point', coordinates: [sh.x[sh.evS[i]], sh.y[sh.evS[i]]] } });
+  }
+  map.getSource('stations-fail').setData({ type: 'FeatureCollection', features: rings });
+  if (sh.hovered !== null) sh.popup.setText(stationLabel(sh.hovered));  // keep the hovered count current
+  const empty = sh.n.filter(n => n <= 0).length, bikes = sh.n.reduce((a, n) => a + Math.max(0, n), 0);
+  document.getElementById('shHint').innerHTML =
+    `<span><i style="background:${sh.colour}"></i>${bikes.toLocaleString()} bikes docked</span>` +
+    `<span><i style="background:${EMPTY_SIGN}"></i>${empty} of ${sh.n.length} empty</span>` +
+    `<span><i style="border:1.5px solid #dc2626;border-radius:50%"></i>failed pickup/dropoff</span>`;
+}
 
 // position at time t, and the index of the last point already passed
 function positionAt(l, t) {
@@ -430,6 +574,7 @@ function frame(now) {
       }
     }
     map.getSource('agents').setData({ type: 'FeatureCollection', features });
+    if (sh && sh.on) drawStations();
     map.getSource('trips').setData({ type: 'FeatureCollection', features: lines });
     clockEls.forEach(e => e.textContent = hhmm(t));
     movingEls.forEach(e => e.innerHTML = `<b>${features.length.toLocaleString()}</b> agents moving`);

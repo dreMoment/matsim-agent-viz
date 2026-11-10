@@ -1,5 +1,5 @@
-"""Write a tiny fake MATSim output folder (events, network, schedule, config)."""
-import gzip, random, sys
+"""Write a tiny fake MATSim output folder (events, network, schedule, config, bike-sharing stations)."""
+import gzip, heapq, random, sys
 from pathlib import Path
 
 out = Path(sys.argv[1]); out.mkdir(parents=True, exist_ok=True)
@@ -31,8 +31,21 @@ with gzip.open(out / "output_transitSchedule.xml.gz", "wt") as f:
         f.write(f'<stopFacility id="s{k}" x="{X0+i*D}" y="{Y0+j*D}" linkRefId="{links[(i,j,i+1,j)] if i+1<N else links[(i,j,i-1,j)]}"/>\n')
     f.write('</transitStops>\n</transitSchedule>\n')
 
+# station-based bike sharing (shared_mobility contrib): a few stations with few bikes, so some run empty
+BIKE_STATIONS = [(3, 3), (3, 12), (3, 21), (12, 3), (12, 21), (21, 3), (21, 12), (21, 21), (8, 8), (16, 16)]
+BIKES_PER_STATION = 3
+(out / "publibike_service.xml").write_text('<?xml version="1.0" encoding="utf-8"?>\n<service>\n<stations>\n'
+    + "".join(f'<station id="st{k}" link="{links[(i,j,i+1,j)]}" capacity="100"/>\n' for k, (i, j) in enumerate(BIKE_STATIONS))
+    + '</stations>\n<vehicles>\n'
+    + "".join(f'<vehicle id="b{k}_{n}" startStation="st{k}" startLink="{links[(i,j,i+1,j)]}"/>\n'
+              for k, (i, j) in enumerate(BIKE_STATIONS) for n in range(BIKES_PER_STATION))
+    + '</vehicles>\n</service>\n')
+
 (out / "output_config.xml").write_text('<?xml version="1.0"?>\n<config><module name="global">'
-    '<param name="coordinateSystem" value="EPSG:2056"/></module></config>\n')
+    '<param name="coordinateSystem" value="EPSG:2056"/></module>'
+    '<module name="sharing"><parameterset type="mode"><param name="id" value="publibike"/>'
+    '<param name="mode" value="publibike"/><param name="serviceScheme" value="StationBased"/>'
+    '<param name="serviceInputFile" value="publibike_service.xml"/></parameterset></module></config>\n')
 
 ev = []
 def E(t, typ, **kw): ev.append((t, len(ev), typ, kw))
@@ -57,12 +70,15 @@ for k, dep in enumerate(range(6*3600, 20*3600, 600)):
             for lid in path((i, j), STOPS[s+1]):
                 E(t, "entered link", vehicle=v, link=lid); t += 40
 
+bike_trips = []  # PubliBike trips are played out afterwards, in time order, so station stocks stay right
 TELE = {"walk": 1.3, "bike": 4.2, "publibike": 4.0, "car_passenger": 8.0, "truck": 9.0, "outside": 12.0, "remote_walk": 1.3}
 for p in range(3000):
     pid = f"p{p}"; mode = rnd.choices(["car", "pt", "walk", "bike", "publibike", "car_passenger", "truck", "outside", "remote_walk"], [30, 25, 20, 8, 4, 6, 3, 3, 1])[0]
     home = (rnd.randrange(N), rnd.randrange(N)); work = (rnd.randrange(N), rnd.randrange(N))
     if home == work: continue
     for leg_no, (a, b, t0) in enumerate(((home, work, rnd.gauss(7.6*3600, 1800)), (work, home, rnd.gauss(17.3*3600, 2400)))):
+        if mode == "publibike":
+            bike_trips.append((pid, leg_no, a, b, t0)); continue
         E(t0, "actend", person=pid, link=link_at(*a), actType="home" if leg_no == 0 else "work", **xy(*a))
         if mode == "car":
             E(t0, "departure", person=pid, link=link_at(*a), legMode="car")
@@ -98,6 +114,53 @@ for p in range(3000):
             E(t, "travelled", person=pid, distance=f"{dist:.1f}", mode=mode)
             E(t, "arrival", person=pid, link=link_at(*b), legMode=mode)
         E(t, "actstart", person=pid, link=link_at(*b), actType="work" if leg_no == 0 else "home", **xy(*b))
+
+# PubliBike: walk to the nearest station, take a bike if one is there, ride to the station nearest the
+# destination and walk on. With no bike, the pickup fails and the person walks the whole way.
+md = lambda a, b: abs(a[0]-b[0]) + abs(a[1]-b[1])
+near = lambda p, skip=None: min((k for k in range(len(BIKE_STATIONS)) if k != skip), key=lambda k: md(p, BIKE_STATIONS[k]))
+stock = {k: [f"b{k}_{n}" for n in range(BIKES_PER_STATION)] for k in range(len(BIKE_STATIONS))}
+returns = []  # (time, station, bike) dropoffs not yet counted
+plans = []
+for pid, leg_no, a, b, t0 in bike_trips:
+    sa = near(a); sb = near(b, skip=sa)
+    plans.append((t0 + max(60, md(a, BIKE_STATIONS[sa]) * D), pid, leg_no, a, b, t0, sa, sb))
+for t1, pid, leg_no, a, b, t0, sa, sb in sorted(plans):
+    while returns and returns[0][0] <= t1:
+        _, k, bike = heapq.heappop(returns); stock[k].append(bike)
+    A, B = BIKE_STATIONS[sa], BIKE_STATIONS[sb]
+    la, lb = links[(A[0], A[1], A[0]+1, A[1])], links[(B[0], B[1], B[0]+1, B[1])]
+    E(t0, "actend", person=pid, link=link_at(*a), actType="home" if leg_no == 0 else "work", **xy(*a))
+    E(t0, "departure", person=pid, link=link_at(*a), legMode="walk")
+    E(t1, "arrival", person=pid, link=la, legMode="walk")
+    E(t1, "actstart", person=pid, link=la, actType="sharing pickup interaction", **xy(*A))
+    if stock[sa]:
+        bike = stock[sa].pop()
+        E(t1, "sharing vehicle pickup", person=pid, service="publibike", link=la, vehicle=bike, station=f"st{sa}")
+        E(t1+30, "actend", person=pid, link=la, actType="sharing pickup interaction", **xy(*A))
+        E(t1+30, "departure", person=pid, link=la, legMode="publibike")
+        dist = md(A, B) * D * 1.4; t2 = t1 + 30 + dist / TELE["publibike"]
+        E(t2, "travelled", person=pid, distance=f"{dist:.1f}", mode="publibike")
+        E(t2, "arrival", person=pid, link=lb, legMode="publibike")
+        E(t2, "actstart", person=pid, link=lb, actType="sharing dropoff interaction", **xy(*B))
+        E(t2, "sharing vehicle dropoff", person=pid, service="publibike", link=lb, vehicle=bike, station=f"st{sb}")
+        heapq.heappush(returns, (t2, sb, bike))
+        E(t2+30, "actend", person=pid, link=lb, actType="sharing dropoff interaction", **xy(*B))
+        E(t2+30, "departure", person=pid, link=lb, legMode="walk")
+        t = t2 + 30 + max(60, md(B, b) * D)
+    else:
+        # like the contrib: the failed event names the nearest station that still has a bike (where the
+        # agent would try next), not the empty one; with no bike anywhere there is no event
+        spare = [k for k in range(len(BIKE_STATIONS)) if stock[k]]
+        if spare:
+            k = min(spare, key=lambda k: md(A, BIKE_STATIONS[k])); K = BIKE_STATIONS[k]
+            E(t1, "sharing vehicle pickup failed", person=pid, service="publibike",
+              link=links[(K[0], K[1], K[0]+1, K[1])], station=f"st{k}")
+        E(t1+30, "actend", person=pid, link=la, actType="sharing pickup interaction", **xy(*A))
+        E(t1+30, "departure", person=pid, link=la, legMode="walk")
+        t = t1 + 30 + max(60, md(A, b) * D)
+    E(t, "arrival", person=pid, link=link_at(*b), legMode="walk")
+    E(t, "actstart", person=pid, link=link_at(*b), actType="work" if leg_no == 0 else "home", **xy(*b))
 
 ev.sort()
 with gzip.open(out / "output_events.xml.gz", "wt") as f:
