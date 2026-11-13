@@ -36,6 +36,7 @@ The page is written to `agents_3d.html` in the run folder (change this with `--o
 | `--events`, `--network`, `--schedule`, `--config`, `--sharing` | found in the run folder | use a file from somewhere else |
 | `--no-rail` | | trains and trams use the run's own links, no track download |
 | `--no-walk` | | walkers move in straight lines, no footpath download |
+| `--no-passenger` | | car passengers move in straight lines |
 | `--view` | | open the existing page, no rebuild |
 | `--no-open` | | only write the page |
 
@@ -66,14 +67,15 @@ It never reads the population, facilities or households files.
   - The ways are downloaded from the Overpass API in tiles of 0.05° (about 5 × 4 km), only where sampled agents walk. The 40 tiles with the most walks get paths, and walks elsewhere stay straight. So do walks under 30 m or over 5 km, and walks whose start or end is more than 250 m from a path. Tiles are cached in `~/.cache/matsim-agent-viz/walk`. A tile can take a minute or more to download when Overpass is busy, so the first build of a large run can take a while. Only the tile bounds go out, no run data.
   - Each walk adds its own path to the page, about 300 bytes per walk.
   - `--no-walk` turns this off and skips the download.
-- **Other teleported modes** (bike, car passenger, …): dots move in a straight line at constant speed, because MATSim doesn't simulate the path.
+- **Car passengers** (modes with "passenger" in the name, or `ride`): MATSim teleports them too. They follow the fastest path on the run's own car links at free-flow speed, keeping MATSim's start and end times, and get trip lines like cars. They get on and off at the nearest node of a road with a speed limit of 60 km/h or less (within 1 km), so never on a motorway. No download. `--no-passenger` turns this off.
+- **Other teleported modes** (bike, …): dots move in a straight line at constant speed, because MATSim doesn't simulate the path.
 
 Any mode name works. Common ones (car, pt, bike, walk, and a few from the Swiss eqasim scenarios such as `publibike` and `outside`) have fixed colours. Other modes get colours from a fallback palette, and their names are tidied up for the legend (`e_scooter` → "E scooter"). To give a mode its own colour, add it to `MODE_STYLE` in `page.html`.
 
 ## In the page
 
 - **Panel**: play/pause, a timeline (24 h, longer if the run goes past midnight), speed (1/4/15/30 simulated min per second), the dot style (Black / By mode) and trip lines (Lines / Off). Click a mode to hide it.
-- **Trip lines**: each leg in progress that is routed through the network (car, PT and other network modes) shows its whole path from start to end as a faint line, with the part already travelled drawn stronger. Walks and other teleported legs (bike, car passenger, …) get no line.
+- **Trip lines**: each leg in progress that is routed through the network (car, car passenger, PT and other network modes) shows its whole path from start to end as a faint line, with the part already travelled drawn stronger. Walks and other teleported legs (bike, …) get no line.
 - **Stations** (only with a sharing service file): each station is a small isometric docking station at the middle of its link: a pad with five docks and a terminal with a sign. The docks fill with the bikes that are there at that moment (up to five), and the sign turns grey when the station is empty. Stations get smaller as you zoom out, so they don't crowd the map. A red ring on the ground marks a failed pickup or dropoff. Station counts use the pickup and dropoff events of all agents, not just the sample. Hover a station to see its id and bike count. The panel shows the bikes docked and the number of empty stations. Free-floating services have no stations and get no layer.
 - **Keys**:
   - `Space` play/pause
