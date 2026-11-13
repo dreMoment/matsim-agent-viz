@@ -760,24 +760,23 @@ def passenger_tracks(legs, roads) -> dict:
     import numpy as np
     from scipy.sparse import csr_matrix
     from scipy.spatial import cKDTree
-    rides = [leg for leg in legs if is_passenger(leg["mode"]) and not leg.get("routed") and len(leg["pts"]) == 2
-             and math.dist(leg["pts"][0][1:], leg["pts"][1][1:]) > 100]
+    rides = [leg for leg in legs if is_passenger(leg["mode"]) and not leg.get("routed") and len(leg["pts"]) == 2]
     if not rides or not roads["links"]:
         return {}
     progress("Routing car passengers on the roads")
     idx, xy = {}, []
     for n, p in roads["nodes"].items():
         idx[n] = len(xy); xy.append(p)
-    a, b, w, local = [], [], [], set()
+    w, local = {}, set()  # parallel links: keep the fastest (the matrix would add them up)
     for u, v, length, speed in roads["links"]:
         if u in idx and v in idx and speed > 0:
-            a.append(idx[u]); b.append(idx[v]); w.append(max(length, 0.1) / speed)
+            e = (idx[u], idx[v]); w[e] = min(w.get(e, math.inf), max(length, 0.1) / speed)
             if speed <= LOCAL_SPEED:
                 local.update((idx[u], idx[v]))
     if not local:
         return {}
     xy = np.array(xy)
-    graph = csr_matrix((w, (a, b)), shape=(len(xy), len(xy)))
+    graph = csr_matrix((list(w.values()), tuple(zip(*w))), shape=(len(xy), len(xy)))
     stops = np.array(sorted(local))
 
     class Local:  # k-d tree over the local road nodes, answering with network node numbers
