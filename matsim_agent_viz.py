@@ -29,7 +29,9 @@ How positions are built:
   * walks: along OpenStreetMap footpaths and streets (cached in
     ~/.cache/matsim-agent-viz/walk), keeping MATSim's start and end times;
     --no-walk turns this off;
-  * other teleported modes (bike, PubliBike, car_passenger, ...): a straight
+  * car passengers: the fastest path on the run's car links, like the cars;
+    --no-passenger turns this off;
+  * other teleported modes (bike, PubliBike, ...): a straight
     line from start to end, at constant speed, because MATSim does not
     simulate their movement;
   * agents are sampled with a stable hash of the person id (--sample).
@@ -57,6 +59,7 @@ Options:
                   use this file instead of the one in the run folder
   --no-rail       trains and trams use the run's own links, no download
   --no-walk       walkers move in straight lines, no download
+  --no-passenger  car passengers move in straight lines
   --no-open       only write the page
 """
 
@@ -249,18 +252,26 @@ def guess_swiss_crs(points) -> CRS:
 
 
 def read_network(path: Path):
-    nodes, links = {}, {}
+    """Link start and middle points, and the car links as (from node, to node, length, freespeed),
+    with the node coordinates: {"nodes": {id: (x, y)}, "links": [...]}."""
+    nodes, links, car = {}, {}, []
     for el in iter_elements(path, {"node", "link"}, "Reading the network"):
         if el.tag == "node":
             nodes[el.get("id")] = (float(el.get("x")), float(el.get("y")))
         else:
-            links[el.get("id")] = (el.get("from"), el.get("to"))
+            a, b = el.get("from"), el.get("to")
+            links[el.get("id")] = (a, b)
+            if "car" in (el.get("modes") or "car").split(","):
+                try:
+                    car.append((a, b, float(el.get("length")), float(el.get("freespeed"))))
+                except (TypeError, ValueError):
+                    pass
     if not nodes or not links:
         fail(f"{path.name} has no nodes or links. Is it a MATSim network?")
     link_from = {l: nodes[a] for l, (a, b) in links.items() if a in nodes}
     link_mid = {l: ((nodes[a][0] + nodes[b][0]) / 2, (nodes[a][1] + nodes[b][1]) / 2)
                 for l, (a, b) in links.items() if a in nodes and b in nodes}
-    return link_from, link_mid
+    return link_from, link_mid, {"nodes": nodes, "links": car}
 
 
 def read_sharing_stations(path: Path, run_dir: Path, config: Path | None, link_mid):
@@ -732,6 +743,58 @@ def shortest_paths(legs, graph, X, Y, tree, snap_m, limit, tol, name):
     return tracks
 
 
+# ---------------------------------------------------------------- car passengers
+# MATSim teleports car passengers too. They follow the fastest path on the run's own car links
+# (free-flow travel times), so they drive where the cars drive. No download.
+PASSENGER_SNAP_M = 1000
+LOCAL_SPEED = 60 / 3.6  # passengers get on and off at nodes of roads this slow or slower, not on motorways
+
+
+def is_passenger(mode: str) -> bool:
+    m = mode.lower()
+    return "passenger" in m or m == "ride"
+
+
+def passenger_tracks(legs, roads) -> dict:
+    """Give the sampled car-passenger legs a path on the run's car links (see shortest_paths)."""
+    import numpy as np
+    from scipy.sparse import csr_matrix
+    from scipy.spatial import cKDTree
+    rides = [leg for leg in legs if is_passenger(leg["mode"]) and not leg.get("routed") and len(leg["pts"]) == 2
+             and math.dist(leg["pts"][0][1:], leg["pts"][1][1:]) > 100]
+    if not rides or not roads["links"]:
+        return {}
+    progress("Routing car passengers on the roads")
+    idx, xy = {}, []
+    for n, p in roads["nodes"].items():
+        idx[n] = len(xy); xy.append(p)
+    a, b, w, local = [], [], [], set()
+    for u, v, length, speed in roads["links"]:
+        if u in idx and v in idx and speed > 0:
+            a.append(idx[u]); b.append(idx[v]); w.append(max(length, 0.1) / speed)
+            if speed <= LOCAL_SPEED:
+                local.update((idx[u], idx[v]))
+    if not local:
+        return {}
+    xy = np.array(xy)
+    graph = csr_matrix((w, (a, b)), shape=(len(xy), len(xy)))
+    stops = np.array(sorted(local))
+
+    class Local:  # k-d tree over the local road nodes, answering with network node numbers
+        node_ids = stops
+        tree = cKDTree(xy[stops])
+        def query(self, pts, distance_upper_bound):
+            return self.tree.query(pts, distance_upper_bound=distance_upper_bound)
+
+    # cost in seconds at free flow: allow a path up to about 3x slower than a straight line at 30 km/h
+    tracks = shortest_paths(rides, graph, xy[:, 0], xy[:, 1], Local(), PASSENGER_SNAP_M,
+                            lambda beeline: beeline / 3 + 300, SIMPLIFY_M, "ride", directed=True)
+    for leg in rides:
+        if leg.get("hops"):
+            leg["routed"] = True  # a path like a car's: it gets a trip line
+    return tracks
+
+
 # ---------------------------------------------------------------- events
 # shared_mobility contrib events -> kind in the page (0 pickup, 1 dropoff, 2 failed pickup, 3 failed dropoff)
 SHARING_EVENTS = {"sharing vehicle pickup": 0, "sharing vehicle dropoff": 1,
@@ -966,11 +1029,12 @@ SETTINGS = Path.home() / ".config" / "matsim-agent-viz" / "launcher.json"
 
 
 def build(run_dir: Path, files: dict[str, Path | None], out: Path, sample: float = 0.1,
-          title: str | None = None, crs: str | None = None, rail: bool = True,
-          walk: bool = True) -> Path:
+          title: str | None = None, crs: str | None = None, rail: bool = True, walk: bool = True,
+          passengers: bool = True) -> Path:
     """Read the run and write the page. `files` maps INPUTS roles to paths (None = not there).
     With `rail`, trains and trams follow OpenStreetMap tracks between stops; with `walk`, walkers follow
-    OpenStreetMap footpaths (both downloaded once, then cached)."""
+    OpenStreetMap footpaths (both downloaded once, then cached); with `passengers`, car passengers follow
+    the run's car links."""
     if not 0 < sample <= 1:
         fail("sample must be between 0 and 1.")
     for role, (name, required, _) in INPUTS.items():
@@ -989,7 +1053,7 @@ def build(run_dir: Path, files: dict[str, Path | None], out: Path, sample: float
     else:
         crs_obj = read_crs(config)
     say("reading network ...")
-    link_from, link_mid = read_network(network)
+    link_from, link_mid, roads = read_network(network)
     if crs_obj is None:
         crs_obj = guess_swiss_crs(link_mid.values())
     if schedule is not None:
@@ -1020,6 +1084,14 @@ def build(run_dir: Path, files: dict[str, Path | None], out: Path, sample: float
             paths = walk_tracks(legs, crs_obj)
             tracks.update(paths)
             say(f"  {len(paths):,} of {n_walks:,} walks follow footpaths, the rest go straight")
+    if passengers:
+        n_rides = sum(is_passenger(leg["mode"]) for leg in legs)
+        if n_rides:
+            say(f"routing {n_rides:,} car passenger legs on the road network ...")
+            paths = passenger_tracks(legs, roads)
+            tracks.update(paths)
+            say(f"  {len(paths):,} of {n_rides:,} follow the roads, the rest go straight")
+    del roads
 
     progress("Writing the page")
     payload = to_payload(legs, crs_obj, sharing, tracks)
@@ -1061,6 +1133,8 @@ def main():
                     help="don't route trains and trams along OpenStreetMap tracks (no download)")
     ap.add_argument("--no-walk", action="store_true",
                     help="walkers move in straight lines, no footpath download")
+    ap.add_argument("--no-passenger", action="store_true",
+                    help="car passengers move in straight lines instead of on the road network")
     ap.add_argument("--view", action="store_true", help="open the existing page in your browser, no rebuild")
     ap.add_argument("--no-open", action="store_true", help="only write the page, don't open it")
     ap.add_argument("--open", action="store_true", help=argparse.SUPPRESS)  # old flag: opening is the default now
@@ -1082,7 +1156,8 @@ def main():
     files.update({role: getattr(args, role) for role in INPUTS if getattr(args, role)})
     if args.config and not args.sharing:  # the sharing file comes from whichever config is used
         files["sharing"] = sharing_for(run_dir, args.config)
-    build(run_dir, files, out, args.sample, args.title, args.crs, rail=not args.no_rail, walk=not args.no_walk)
+    build(run_dir, files, out, args.sample, args.title, args.crs, rail=not args.no_rail, walk=not args.no_walk,
+          passengers=not args.no_passenger)
     if args.no_open:
         print("To watch it later without rebuilding, add --view.")
     else:
