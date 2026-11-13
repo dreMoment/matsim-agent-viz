@@ -13,7 +13,7 @@ and Mapterhorn, so it needs internet. Your data stays in the file.
 What it reads (plain or .gz):
   output_events.xml       movements of the final iteration
   output_network.xml      node coordinates for link events
-  output_transitSchedule  stop coordinates for public transport (optional)
+  output_transitSchedule  stop coordinates and modes of public transport (optional)
   output_config.xml       coordinate system and iteration (optional)
   sharing service file    bike-sharing stations and bikes (optional), found
                           through the config's sharing module
@@ -22,6 +22,10 @@ It never reads the population, facilities or households files.
 How positions are built:
   * car and pt: from the vehicle's link entries and stop arrivals/departures,
     so dots follow the network and wait at stops;
+  * trains and trams: between two stops, along the railway tracks of
+    OpenStreetMap (downloaded from Overpass once, cached in
+    ~/.cache/matsim-agent-viz/rail), because their network links are often
+    straight lines; --no-rail turns this off;
   * teleported modes (walk, bike, PubliBike, car_passenger, ...): a straight
     line from start to end, at constant speed, because MATSim does not
     simulate their movement;
@@ -48,12 +52,15 @@ Options:
   --out FILE      HTML to write (default: agents_3d.html in the run folder)
   --events/--network/--schedule/--config/--sharing FILE
                   use this file instead of the one in the run folder
+  --no-rail       trains and trams use the run's own links, no download
   --no-open       only write the page
 """
 
 import argparse
 import gzip
+import heapq
 import json
+import math
 import re
 import sys
 import time
@@ -291,11 +298,290 @@ def read_sharing_stations(path: Path, run_dir: Path, config: Path | None, link_m
             "skip": set() if svc else {s.get("id") for s in services}}
 
 
-def read_stops(path: Path):
-    stops = {}
-    for el in iter_elements(path, {"stopFacility"}, "Reading transit stops"):
-        stops[el.get("id")] = (float(el.get("x")), float(el.get("y")))
-    return stops
+def read_schedule(path: Path):
+    """Stop coordinates, and the track kind ('rail', 'tram') of each (line, route) that runs on tracks."""
+    stops, kinds = {}, {}
+    for el in iter_elements(path, {"stopFacility", "transitLine"}, "Reading transit stops"):
+        if el.tag == "stopFacility":
+            stops[el.get("id")] = (float(el.get("x")), float(el.get("y")))
+        else:
+            for route in el.iter("transitRoute"):
+                kind = track_kind(route.findtext("transportMode"))
+                if kind:
+                    kinds[(el.get("id"), route.get("id"))] = kind
+            el.clear()  # departures make up most of a schedule
+    return stops, kinds
+
+
+# ---------------------------------------------------------------- rail tracks
+# Trains and trams often run on straight "artificial" links between stops (pt2matsim builds them so).
+# To draw them on the real tracks, the script downloads the railway lines of OpenStreetMap around the
+# stops that sampled riders used and routes each hop between two stops along them.
+OVERPASS = "https://overpass-api.de/api/interpreter"
+RAIL_CACHE = Path.home() / ".cache" / "matsim-agent-viz" / "rail"  # OSM tracks per 1-degree tile, public data
+RAIL_TYPES = "rail|light_rail|narrow_gauge|subway|tram"
+MAX_RAIL_TILES = 60
+SNAP_M = 300            # a stop looks for tracks this close
+WRONG_TRACK = 4.0       # cost factor for a train on tram tracks, or a tram on rail tracks
+SIDING = 1.3            # cost factor for sidings: through tracks first
+MAX_TURN_COS = -0.17    # no turns sharper than ~100 degrees: a train cannot reverse at a switch
+SIMPLIFY_M = 3.0
+
+
+def track_kind(transport_mode: str | None) -> str | None:
+    """'rail' or 'tram' for transit modes that run on tracks, else None (bus, ferry, funicular, ...)."""
+    m = (transport_mode or "").lower()
+    if "tram" in m:
+        return "tram"
+    if re.search(r"rail|train|subway|metro|s-?bahn", m):
+        return "rail"
+    return None
+
+
+def osm_tile(path: Path, query: str, what: str) -> dict | None:
+    """Overpass result for `query`, cached gzipped at `path` (public OSM data, no run data). None if offline."""
+    import urllib.parse, urllib.request
+    if path.is_file():
+        try:
+            return json.loads(gzip.decompress(path.read_bytes()))
+        except (OSError, ValueError):
+            pass  # broken cache file: download again
+    req = urllib.request.Request(OVERPASS, data=urllib.parse.urlencode({"data": query}).encode(),
+                                 headers={"User-Agent": "matsim-agent-viz"})
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=300) as r:
+                raw = r.read()
+            data = json.loads(raw)
+            if "error" in data.get("remark", ""):  # timed out or out of memory: the data is incomplete
+                raise RuntimeError(data["remark"][:200])
+            break
+        except Exception as e:
+            if attempt == 2:
+                say(f"note: could not download {what} ({type(e).__name__}: {e})")
+                return None
+            time.sleep(10 * (attempt + 1))  # Overpass is busy now and then
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_bytes(gzip.compress(raw))
+    tmp.replace(path)
+    return data
+
+
+def rail_tile(lat: int, lon: int) -> dict | None:
+    """OSM railway ways and their nodes in a 1x1 degree tile."""
+    query = (f'[out:json][timeout:240];way["railway"~"^({RAIL_TYPES})$"]["service"!~"^(yard|spur)$"]'
+             f'({lat},{lon},{lat + 1},{lon + 1})->.w;.w out body qt;node(w.w);out skel qt;')
+    return osm_tile(RAIL_CACHE / f"{lat}_{lon}.json.gz", query, "rail tracks")
+
+
+class RailGraph:
+    """Tracks as a graph of OSM nodes in the run's coordinates, with a grid index of track segments."""
+    CELL = 250.0
+
+    def __init__(self, tiles: list[dict], crs: CRS):
+        tf = Transformer.from_crs(4326, crs, always_xy=True)
+        ids, lons, lats, ways = {}, [], [], {}
+        for data in tiles:
+            for el in data.get("elements", []):
+                if el["type"] == "node" and el["id"] not in ids:
+                    ids[el["id"]] = len(lons); lons.append(el["lon"]); lats.append(el["lat"])
+                elif el["type"] == "way":
+                    ways[el["id"]] = el
+        self.x, self.y = (list(v) for v in tf.transform(lons, lats)) if lons else ([], [])
+        # adjacency: node -> [(neighbour, length, track kind 0 rail / 1 tram / 2 both, cost factor)]
+        self.adj = [[] for _ in lons]
+        self.grid = {}
+        for w in ways.values():
+            tags = w.get("tags", {})
+            kind = {"tram": 1, "light_rail": 2}.get(tags.get("railway"), 0)
+            factor = SIDING if tags.get("service") == "siding" else 1.0
+            refs = [ids[n] for n in w.get("nodes", []) if n in ids]
+            for a, b in zip(refs, refs[1:]):
+                if a == b:
+                    continue
+                d = math.dist((self.x[a], self.y[a]), (self.x[b], self.y[b]))
+                self.adj[a].append((b, d, kind, factor)); self.adj[b].append((a, d, kind, factor))
+                self._index(a, b, kind)
+
+    def _index(self, a, b, kind):
+        c = self.CELL
+        x0, x1 = sorted((self.x[a], self.x[b])); y0, y1 = sorted((self.y[a], self.y[b]))
+        for i in range(int(x0 // c), int(x1 // c) + 1):
+            for j in range(int(y0 // c), int(y1 // c) + 1):
+                self.grid.setdefault((i, j), []).append((a, b, kind))
+
+    def snaps(self, x, y, kind):
+        """Track segments near (x, y): [(a, b, px, py, offset)], the point on the segment closest to it."""
+        c, r = self.CELL, int(SNAP_M // self.CELL) + 1
+        ci, cj = int(x // c), int(y // c)
+        out, seen = [], set()
+        for i in range(ci - r, ci + r + 1):
+            for j in range(cj - r, cj + r + 1):
+                for a, b, k in self.grid.get((i, j), ()):
+                    if (a, b) in seen or not compatible(k, kind):
+                        continue
+                    seen.add((a, b))
+                    ax, ay, bx, by = self.x[a], self.y[a], self.x[b], self.y[b]
+                    dx, dy = bx - ax, by - ay
+                    f = max(0.0, min(1.0, ((x - ax) * dx + (y - ay) * dy) / (dx * dx + dy * dy)))
+                    px, py = ax + f * dx, ay + f * dy
+                    d = math.hypot(x - px, y - py)
+                    if d <= SNAP_M:
+                        out.append((a, b, px, py, d))
+        return out
+
+    def route(self, start, end, kind):
+        """Track polyline from stop `start` to stop `end` (both (x, y)), or None if there is no sensible one.
+
+        A* over (node, previous node), so the path never turns back at a switch. Leaving a stop costs
+        twice the distance to the track, so stops take the nearest suitable track."""
+        src, dst = self.snaps(*start, kind), self.snaps(*end, kind)
+        if not src or not dst:
+            return None
+        straight = math.dist(start, end)
+        limit = 3 * straight + 3000
+        ex, ey = end
+        X, Y = self.x, self.y
+        h = lambda n: math.hypot(X[n] - ex, Y[n] - ey)
+        # where the path can leave the track to reach the end stop: node -> [(towards node, px, py, extra cost)]
+        goal = {}
+        for a, b, px, py, d in dst:
+            goal.setdefault(a, []).append((b, px, py, math.hypot(X[a] - px, Y[a] - py) + 2 * d))
+            goal.setdefault(b, []).append((a, px, py, math.hypot(X[b] - px, Y[b] - py) + 2 * d))
+        best, parent, heap = {}, {}, []
+        finals = []  # (cost, last state or None, start point if no state, end point)
+        for a, b, px, py, d in src:
+            for n, other in ((a, b), (b, a)):
+                g = 2 * d + math.hypot(X[n] - px, Y[n] - py)
+                state = (n, other)  # moving away from `other`, so the next step must not turn back to it
+                if g < best.get(state, math.inf):
+                    best[state] = g; parent[state] = ("start", px, py)
+                    heapq.heappush(heap, (g + h(n), g, state))
+        for a, b, px, py, d in src:  # both stops on the same segment: straight along it
+            for a2, b2, qx, qy, d2 in dst:
+                if {a, b} == {a2, b2}:
+                    finals.append((2 * d + math.hypot(px - qx, py - qy) + 2 * d2, None, px, py, qx, qy))
+        expanded = 0
+        while heap:
+            f, g, state = heapq.heappop(heap)
+            if finals and f >= min(c[0] for c in finals):
+                break
+            if g > best.get(state, math.inf) or f > limit:
+                continue
+            expanded += 1
+            if expanded > 300_000:
+                break
+            n, prev = state
+            vx, vy = X[n] - X[prev], Y[n] - Y[prev]
+            vl = math.hypot(vx, vy) or 1.0
+            for towards, qx, qy, extra in goal.get(n, ()):
+                tx, ty = X[towards] - X[n], Y[towards] - Y[n]
+                if towards != prev and (vx * tx + vy * ty) / (vl * (math.hypot(tx, ty) or 1.0)) >= MAX_TURN_COS:
+                    finals.append((g + extra, state, None, None, qx, qy))
+            for m, d, k, factor in self.adj[n]:
+                if m == prev:
+                    continue
+                wx, wy = X[m] - X[n], Y[m] - Y[n]
+                wl = math.hypot(wx, wy) or 1.0
+                if (vx * wx + vy * wy) / (vl * wl) < MAX_TURN_COS:
+                    continue
+                g2 = g + d * factor * (1.0 if compatible(k, kind) else WRONG_TRACK)
+                s2 = (m, n)
+                if g2 < best.get(s2, math.inf):
+                    best[s2] = g2; parent[s2] = state
+                    heapq.heappush(heap, (g2 + h(m), g2, s2))
+        if not finals:
+            return None
+        cost, state, px, py, qx, qy = min(finals, key=lambda f: f[0])
+        if cost > limit:
+            return None
+        pts = [(qx, qy)]
+        while state is not None and len(pts) < 1_000_000:
+            pts.append((X[state[0]], Y[state[0]]))
+            p = parent[state]
+            if p[0] == "start":
+                px, py = p[1], p[2]
+                state = None
+            else:
+                state = p
+        pts.append((px, py))
+        pts.reverse()
+        return simplify(pts, SIMPLIFY_M)
+
+
+def compatible(track: int, kind: str) -> bool:
+    return track == 2 or (track == 1) == (kind == "tram")
+
+
+def simplify(pts, tol):
+    """Douglas-Peucker: drop points closer than `tol` metres to the line through their neighbours."""
+    if len(pts) < 3:
+        return pts
+    keep = [False] * len(pts); keep[0] = keep[-1] = True
+    stack = [(0, len(pts) - 1)]
+    while stack:
+        i, j = stack.pop()
+        (ax, ay), (bx, by) = pts[i], pts[j]
+        dx, dy = bx - ax, by - ay
+        ln = math.hypot(dx, dy)
+        far, k = 0.0, None
+        for m in range(i + 1, j):
+            x, y = pts[m]
+            d = abs(dx * (ay - y) - dy * (ax - x)) / ln if ln else math.hypot(x - ax, y - ay)
+            if d > far:
+                far, k = d, m
+        if k is not None and far > tol:
+            keep[k] = True
+            stack += [(i, k), (k, j)]
+    return [p for p, kp in zip(pts, keep) if kp]
+
+
+def rail_tracks(hops: set, stops: dict, crs: CRS) -> dict:
+    """Track polylines for the hops {(from stop, to stop, kind)}: {hop: [(x, y), ...]}, in run coordinates."""
+    if crs.is_geographic:
+        say("note: the run's coordinates are in degrees, not metres; trains move in straight lines")
+        return {}
+    to_wgs = Transformer.from_crs(crs, 4326, always_xy=True)
+    tiles = set()
+    for a, b, _ in hops:
+        (ax, ay), (bx, by) = stops[a], stops[b]
+        steps = max(1, int(math.dist((ax, ay), (bx, by)) // 20000))  # tiles along the hop, every 20 km
+        for s in range(steps + 1):
+            lon, lat = to_wgs.transform(ax + (bx - ax) * s / steps, ay + (by - ay) * s / steps)
+            tiles.add((math.floor(lat), math.floor(lon)))
+    if len(tiles) > MAX_RAIL_TILES:
+        say(f"note: the trains cover {len(tiles)} map tiles of 1 degree, only the {MAX_RAIL_TILES} "
+            "with most stops get tracks")
+        count = Counter()
+        for a, b, _ in hops:
+            for s in (a, b):
+                lon, lat = to_wgs.transform(*stops[s])
+                count[(math.floor(lat), math.floor(lon))] += 1
+        tiles = {t for t, _ in count.most_common(MAX_RAIL_TILES)}
+    data, cached = [], 0
+    for i, (lat, lon) in enumerate(sorted(tiles)):
+        is_cached = (RAIL_CACHE / f"{lat}_{lon}.json.gz").is_file()
+        cached += is_cached
+        if not is_cached:
+            say(f"  downloading rail tracks from OpenStreetMap, tile {i + 1} of {len(tiles)} ...")
+        progress(f"Rail tracks: tile {i + 1} of {len(tiles)}")
+        tile = rail_tile(lat, lon)
+        if tile is None:
+            say("note: trains and trams move in straight lines between stops where tracks are missing")
+            break
+        data.append(tile)
+    if not data:
+        return {}
+    progress("Routing trains on the tracks")
+    graph = RailGraph(data, crs)
+    out = {}
+    for hop in hops:
+        a, b, kind = hop
+        line = graph.route(stops[a], stops[b], kind)
+        if line:
+            out[hop] = line
+    return out
 
 
 # ---------------------------------------------------------------- events
@@ -307,9 +593,13 @@ SHARING_EVENTS = {"sharing vehicle pickup": 0, "sharing vehicle dropoff": 1,
 SHARING_ACTS = {"sharing pickup interaction", "sharing dropoff interaction"}
 
 
-def build_legs(events: Path, sample: float, link_from, link_mid, stops, sharing=None):
+def build_legs(events: Path, sample: float, link_from, link_mid, stops, sharing=None, route_kinds=None):
     """Legs of the sampled agents. With `sharing` (stations), also collects every station event
-    of that service into sharing["ev"], for all agents: the page shows only station totals."""
+    of that service into sharing["ev"], for all agents: the page shows only station totals.
+
+    With `route_kinds` ((line, route) -> 'rail' / 'tram'), each ride of a train or tram between two
+    stops is noted in leg["hops"] as (index of the departure point, index of the arrival point,
+    (from stop, to stop, kind)), so it can be drawn along the tracks later."""
     threshold = int(sample * 10000)
 
     def sampled(person):
@@ -326,18 +616,25 @@ def build_legs(events: Path, sample: float, link_from, link_mid, stops, sharing=
     at_station = {}    # person -> link of the sharing pickup/dropoff activity they are at (all persons)
     if sharing is not None:
         sharing["ev"] = []
+    route_kinds = route_kinds or {}
+    on_tracks = {}     # vehicle -> 'rail' / 'tram', for transit vehicles of routes that run on tracks
+    departed = {}      # such vehicle -> (stop it last left, time)
 
-    def add(person, t, xy, routed=False):
+    def add(person, t, xy, routed=False, keep=False):
+        """Add a point to the person's open leg. Points closer in time than MIN_POINT_GAP_S replace
+        the last one, unless that one is kept (a train's stop, which a track hop starts from)."""
         leg = open_leg.get(person)
         if leg is None or xy is None:
             return
         if routed:
             leg["routed"] = True
         pts = leg["pts"]
-        if pts and t - pts[-1][0] < MIN_POINT_GAP_S and len(pts) > 1:
+        if pts and t - pts[-1][0] < MIN_POINT_GAP_S and len(pts) > 1 and leg.get("kept") != len(pts) - 1:
             pts[-1] = (t, *xy)
         else:
             pts.append((t, *xy))
+        if keep:
+            leg["kept"] = len(pts) - 1
 
     def finish(person):
         leg = pending.pop(person, None)
@@ -387,10 +684,27 @@ def build_legs(events: Path, sample: float, link_from, link_mid, stops, sharing=
                     add(p, t, xy, routed=True)
         elif typ in ("VehicleArrivesAtFacility", "VehicleDepartsAtFacility"):
             veh = el.get("vehicle")
+            stop = el.get("facility")
+            kind = on_tracks.get(veh)
             if veh in riders:
-                xy = stops.get(el.get("facility"))
+                xy = stops.get(stop)
+                prev = departed.get(veh) if kind and typ == "VehicleArrivesAtFacility" else None
                 for p in riders[veh]:
-                    add(p, t, xy, routed=True)
+                    leg = open_leg.get(p)
+                    hop = None
+                    if prev and xy is not None and leg and prev[0] != stop and leg.get("kept") is not None \
+                            and leg["pts"][leg["kept"]][0] == prev[1]:  # on board since the last stop
+                        hop = (leg["kept"], prev[0], stop, kind)
+                    add(p, t, xy, routed=True, keep=kind is not None)
+                    if hop and leg["pts"][-1][0] == t:
+                        leg.setdefault("hops", []).append((hop[0], len(leg["pts"]) - 1, hop[1:]))
+            if kind and typ == "VehicleDepartsAtFacility":
+                departed[veh] = (stop, t)
+        elif typ == "TransitDriverStarts":
+            kind = route_kinds.get((el.get("transitLineId"), el.get("transitRouteId")))
+            if kind:
+                on_tracks[el.get("vehicleId")] = kind
+                departed.pop(el.get("vehicleId"), None)
         elif typ == "arrival":
             if sampled(person) and person in open_leg:
                 leg = open_leg.pop(person)
@@ -438,25 +752,52 @@ def build_legs(events: Path, sample: float, link_from, link_mid, stops, sharing=
 
 
 # ---------------------------------------------------------------- output
-def to_payload(legs, crs: CRS, sharing=None):
+def with_tracks(leg, track_idx):
+    """The leg's points without those inside hops that have a track, and [point index, track, ...]:
+    the page inserts each track after that point. Hops are (first point, last point, track key)."""
+    pts, refs, i = [], [], 0
+    for k_dep, k_arr, key in leg.get("hops", ()):
+        t = track_idx.get(key)
+        if t is None or k_dep < i:
+            continue
+        pts += leg["pts"][i:k_dep + 1]
+        refs += [len(pts) - 1, t]
+        i = k_arr
+    return pts + leg["pts"][i:], refs
+
+
+def deltas(v):
+    """First value, then the steps between values: shorter numbers in the JSON."""
+    return v[:1] + [b - a for a, b in zip(v, v[1:])]
+
+
+def to_payload(legs, crs: CRS, sharing=None, tracks=None):
     tf = Transformer.from_crs(crs, 4326, always_xy=True)
     modes = sorted({leg["mode"] for leg in legs})
     mode_idx = {m: i for i, m in enumerate(modes)}
+    tracks = tracks or {}
+    track_idx = {hop: i for i, hop in enumerate(tracks)}
     out = []
     starts_lon, starts_lat = [], []
     for leg in legs:
-        ts, xs, ys = zip(*leg["pts"])
+        pts, refs = with_tracks(leg, track_idx)
+        ts, xs, ys = zip(*pts)
         lons, lats = tf.transform(xs, ys)
         lon_i = [round(v * 1e5) for v in lons]
         lat_i = [round(v * 1e5) for v in lats]
         routed = 1 if leg.get("routed") else 0  # moved through network links or transit stops, not teleported
-        out.append([mode_idx[leg["mode"]], [round(v) for v in ts], lon_i, lat_i, routed])
+        out.append([mode_idx[leg["mode"]], [round(v) for v in ts], lon_i, lat_i, routed] + ([refs] if refs else []))
         starts_lon.append(lons[0]); starts_lat.append(lats[0])
     out.sort(key=lambda r: r[1][0])
     # initial view: close in on the median leg start, where 3D buildings show
     starts_lon.sort(); starts_lat.sort()
     centre = [starts_lon[len(starts_lon) // 2], starts_lat[len(starts_lat) // 2]]
     payload = {"modes": modes, "legs": out, "centre": centre}
+    if tracks:  # train and tram paths, each stored once: [[lon, Δlon, ...], [lat, Δlat, ...]]
+        payload["tracks"] = []
+        for line in tracks.values():
+            lons, lats = tf.transform(*zip(*line))
+            payload["tracks"].append([deltas([round(v * 1e5) for v in lons]), deltas([round(v * 1e5) for v in lats])])
     if sharing is not None:
         xs, ys = zip(*sharing["xy"])
         lons, lats = tf.transform(xs, ys)
@@ -477,8 +818,9 @@ SETTINGS = Path.home() / ".config" / "matsim-agent-viz" / "launcher.json"
 
 
 def build(run_dir: Path, files: dict[str, Path | None], out: Path, sample: float = 0.1,
-          title: str | None = None, crs: str | None = None) -> Path:
-    """Read the run and write the page. `files` maps INPUTS roles to paths (None = not there)."""
+          title: str | None = None, crs: str | None = None, rail: bool = True) -> Path:
+    """Read the run and write the page. `files` maps INPUTS roles to paths (None = not there).
+    With `rail`, trains and trams follow OpenStreetMap tracks between stops (downloaded once, then cached)."""
     if not 0 < sample <= 1:
         fail("sample must be between 0 and 1.")
     for role, (name, required, _) in INPUTS.items():
@@ -502,21 +844,28 @@ def build(run_dir: Path, files: dict[str, Path | None], out: Path, sample: float
         crs_obj = guess_swiss_crs(link_mid.values())
     if schedule is not None:
         say("reading transit stops ...")
-        stops = read_stops(schedule)
+        stops, route_kinds = read_schedule(schedule)
     else:
         say("no transit schedule: pt riders follow the network links only")
-        stops = {}
+        stops, route_kinds = {}, {}
     sharing = None
     if sharing_file is not None:
         say("reading sharing stations ...")
         sharing = read_sharing_stations(sharing_file, run_dir, config, link_mid)
     say("reading events (this can take a few minutes) ...")
-    legs, n_events = build_legs(events, sample, link_from, link_mid, stops, sharing)
+    legs, n_events = build_legs(events, sample, link_from, link_mid, stops, sharing,
+                                route_kinds if rail else None)
     if not legs:
         fail("no legs found for the sampled agents. Try a larger sample.")
+    hops = {h[2] for leg in legs for h in leg.get("hops", ())}
+    tracks = {}
+    if hops:
+        say(f"routing {len(hops):,} train and tram hops on OpenStreetMap tracks ...")
+        tracks = rail_tracks(hops, stops, crs_obj)
+        say(f"  {len(tracks):,} of {len(hops):,} hops follow the tracks, the rest go straight between stops")
 
     progress("Writing the page")
-    payload = to_payload(legs, crs_obj, sharing)
+    payload = to_payload(legs, crs_obj, sharing, tracks)
     title = title or scenario_name(run_dir)
     last_it = read_param(config, "lastIteration")
     eyebrow = f"{title} · " + (f"iteration {last_it}" if last_it else "last iteration")
@@ -551,6 +900,8 @@ def main():
     ap.add_argument("--crs", help="coordinate system of the run, e.g. EPSG:2056 (default: from output_config)")
     for role, (name, _, use) in INPUTS.items():
         ap.add_argument(f"--{role}", type=Path, help=f"use this file instead of the one found in the run folder ({use})")
+    ap.add_argument("--no-rail", action="store_true",
+                    help="don't route trains and trams along OpenStreetMap tracks (no download)")
     ap.add_argument("--view", action="store_true", help="open the existing page in your browser, no rebuild")
     ap.add_argument("--no-open", action="store_true", help="only write the page, don't open it")
     ap.add_argument("--open", action="store_true", help=argparse.SUPPRESS)  # old flag: opening is the default now
@@ -572,7 +923,7 @@ def main():
     files.update({role: getattr(args, role) for role in INPUTS if getattr(args, role)})
     if args.config and not args.sharing:  # the sharing file comes from whichever config is used
         files["sharing"] = sharing_for(run_dir, args.config)
-    build(run_dir, files, out, args.sample, args.title, args.crs)
+    build(run_dir, files, out, args.sample, args.title, args.crs, rail=not args.no_rail)
     if args.no_open:
         print("To watch it later without rebuilding, add --view.")
     else:

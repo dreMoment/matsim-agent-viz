@@ -34,6 +34,7 @@ The page is written to `agents_3d.html` in the run folder (change this with `--o
 | `--title` | from the folder name | scenario name on the page |
 | `--crs` | from `output_config.xml` | e.g. `EPSG:2056`, if the config doesn't set one (an LV95/LV03 guess is the fallback) |
 | `--events`, `--network`, `--schedule`, `--config`, `--sharing` | found in the run folder | use a file from somewhere else |
+| `--no-rail` | | trains and trams use the run's own links, no track download |
 | `--view` | | open the existing page, no rebuild |
 | `--no-open` | | only write the page |
 
@@ -45,7 +46,7 @@ Plain or `.gz`, with or without a run-id prefix (`myrun.output_events.xml.gz`):
 
 - `output_events.xml.gz` (required): movements of the final iteration
 - `output_network.xml.gz` (required): link coordinates
-- `output_transitSchedule.xml.gz` (optional): stop coordinates. Without it, PT riders follow the network links only.
+- `output_transitSchedule.xml.gz` (optional): stop coordinates, and which routes are trains or trams. Without it, PT riders follow the network links only.
 - `output_config.xml` (optional): coordinate system (`global.coordinateSystem`) and last iteration number.
 - sharing service file (optional): stations and bikes of a station-based bike-sharing service (shared_mobility contrib), e.g. `publibike_service.xml`. The script follows `serviceInputFile` in the config's `sharing` module and looks for the file in the run folder, next to the config and in the folder above. Otherwise pass it with `--sharing`. With several station-based services, the first one found is shown; pass `--sharing` to pick another.
 
@@ -56,6 +57,9 @@ It never reads the population, facilities or households files.
 **Events format.** Only the standard XML events file (plain or `.gz`) is supported.
 
 - **Car and PT**: dots follow the vehicle's link entries and stop events. This includes the SBB deterministic transit engine.
+- **Trains and trams**: their network links are often straight lines from stop to stop (pt2matsim builds rail that way). So between two stops, dots follow the real railway tracks from OpenStreetMap instead. The script finds the shortest path along the tracks that never turns back at a switch, with trains kept on rail tracks and trams on tram tracks. Routes count as trains when their `transportMode` contains rail, train, subway, metro or S-Bahn, and as trams when it contains tram. The vehicle's route comes from the `TransitDriverStarts` events. If no suitable track is within 300 m of both stops, the dot goes straight, as before.
+  - The tracks are downloaded from the Overpass API by 1° tile around the stops that riders used. A first build for all of Switzerland takes a few minutes. After that, the tiles come from `~/.cache/matsim-agent-viz/rail` (delete the folder to refresh them). Only the tile bounds go out, no run data.
+  - `--no-rail` turns this off and skips the download.
 - **Other network modes** (DRT, network-routed sharing, freight, …): any agent that enters a vehicle follows that vehicle's link events the same way. Not tested beyond car and PT.
 - **Teleported modes** (walk, bike, car passenger, …): dots move in a straight line at constant speed, because MATSim doesn't simulate the path.
 

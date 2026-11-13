@@ -1,4 +1,7 @@
-"""Write a tiny fake MATSim output folder (events, network, schedule, config, bike-sharing stations)."""
+"""Write a tiny fake MATSim output folder (events, network, schedule, config, bike-sharing stations).
+
+Public transport: a bus line on the street grid, and an S-Bahn and a tram line at real Zurich stops that
+run on straight links between their stops, as pt2matsim builds them for rail."""
 import gzip, heapq, random, sys
 from pathlib import Path
 
@@ -7,12 +10,26 @@ rnd = random.Random(3)
 X0, Y0, N, D = 2680000, 1245000, 25, 300  # 25x25 grid, 300 m spacing, around Zurich HB
 
 def nid(i, j): return f"n{i}_{j}"
+# a bus line along row j=12, stops every 3 nodes
+STOPS = [(i, 12) for i in range(0, N, 3)]
+# lines on tracks: (line, transportMode, stops (id, x, y), seconds between stops, headway); real stop positions in LV95
+TRACK_LINES = [
+    ("S5", "rail", [("hardbruecke", 2681456, 1248818), ("hb", 2683126, 1248057), ("stadelhofen", 2683825, 1246784),
+                    ("tiefenbrunnen", 2684830, 1244969)], 180, 900),
+    ("S9", "rail", [("hb", 2683126, 1248057), ("oerlikon", 2683435, 1251775)], 360, 900),
+    ("T6", "tram", [("paradeplatz", 2683110, 1247130), ("rennweg", 2683051, 1247503), ("bahnhofstrasse", 2683135, 1247833),
+                    ("central", 2683460, 1247900), ("haldenegg", 2683525, 1248225)], 90, 450),
+]
+TRACK_LINES = [(l, m, [(f"{l}_{sid}", x, y) for sid, x, y in st], hop, hw) for l, m, st, hop, hw in TRACK_LINES]
 links = {}
 with gzip.open(out / "output_network.xml.gz", "wt") as f:
     f.write('<?xml version="1.0"?>\n<network>\n<nodes>\n')
     for i in range(N):
         for j in range(N):
             f.write(f'<node id="{nid(i,j)}" x="{X0+i*D}" y="{Y0+j*D}"/>\n')
+    for _, _, stops, *_ in TRACK_LINES:
+        for sid, x, y in stops:
+            f.write(f'<node id="pt_{sid}" x="{x}" y="{y}"/>\n')
     f.write('</nodes>\n<links>\n')
     for i in range(N):
         for j in range(N):
@@ -21,15 +38,25 @@ with gzip.open(out / "output_network.xml.gz", "wt") as f:
                 if 0 <= a < N and 0 <= b < N:
                     lid = f"{nid(i,j)}-{nid(a,b)}"; links[(i,j,a,b)] = lid
                     f.write(f'<link id="{lid}" from="{nid(i,j)}" to="{nid(a,b)}" length="{D}" freespeed="13.9" capacity="1000" permlanes="1" modes="car,pt"/>\n')
+    # S-Bahn and tram: straight links from stop to stop, both ways (see TRACK_LINES)
+    for line, mode, stops, *_ in TRACK_LINES:
+        for (a, *_), (b, *_) in zip(stops, stops[1:]):
+            for u, v in ((a, b), (b, a)):
+                f.write(f'<link id="pt_{u}_{v}" from="pt_{u}" to="pt_{v}" length="1000" freespeed="20" capacity="9999" permlanes="1" modes="{mode}"/>\n')
     f.write('</links>\n</network>\n')
 
-# a bus line along row j=12, stops every 3 nodes
-STOPS = [(i, 12) for i in range(0, N, 3)]
 with gzip.open(out / "output_transitSchedule.xml.gz", "wt") as f:
     f.write('<?xml version="1.0"?>\n<transitSchedule>\n<transitStops>\n')
     for k, (i, j) in enumerate(STOPS):
         f.write(f'<stopFacility id="s{k}" x="{X0+i*D}" y="{Y0+j*D}" linkRefId="{links[(i,j,i+1,j)] if i+1<N else links[(i,j,i-1,j)]}"/>\n')
-    f.write('</transitStops>\n</transitSchedule>\n')
+    for line, mode, stops, *_ in TRACK_LINES:
+        for k, (sid, x, y) in enumerate(stops):
+            f.write(f'<stopFacility id="{sid}" x="{x}" y="{y}" linkRefId="pt_{sid}_{stops[k+1 if k+1 < len(stops) else k-1][0]}"/>\n')
+    f.write('</transitStops>\n')
+    f.write('<transitLine id="bus"><transitRoute id="bus_e"><transportMode>bus</transportMode></transitRoute></transitLine>\n')
+    for line, mode, *_ in TRACK_LINES:
+        f.write(f'<transitLine id="{line}">' + "".join(f'<transitRoute id="{line}_{d}"><transportMode>{mode}</transportMode></transitRoute>' for d in (0, 1)) + '</transitLine>\n')
+    f.write('</transitSchedule>\n')
 
 # station-based bike sharing (shared_mobility contrib): a few stations with few bikes, so some run empty
 BIKE_STATIONS = [(3, 3), (3, 12), (3, 21), (12, 3), (12, 21), (21, 3), (21, 12), (21, 21), (8, 8), (16, 16)]
@@ -61,6 +88,7 @@ def xy(i, j): return dict(x=str(X0+i*D+20), y=str(Y0+j*D+20))
 bus_times = {}
 for k, dep in enumerate(range(6*3600, 20*3600, 600)):
     v = f"bus_{k}"; t = dep
+    E(t - 60, "TransitDriverStarts", driverId=f"pt_{v}", vehicleId=v, transitLineId="bus", transitRouteId="bus_e", departureId=v)
     for s, (i, j) in enumerate(STOPS):
         E(t, "VehicleArrivesAtFacility", vehicle=v, facility=f"s{s}")
         bus_times.setdefault((k, s), t)
@@ -69,6 +97,21 @@ for k, dep in enumerate(range(6*3600, 20*3600, 600)):
         if s + 1 < len(STOPS):
             for lid in path((i, j), STOPS[s+1]):
                 E(t, "entered link", vehicle=v, link=lid); t += 40
+
+# trains and trams, both ways, 06:00 to 20:00, 30 s dwell
+track_times = {}  # (line, direction) -> [(vehicle, {stop: arrival time})]
+for line, mode, stops, hop, headway in TRACK_LINES:
+    for d in (0, 1):
+        seq = stops if d == 0 else stops[::-1]
+        for k, dep in enumerate(range(6*3600 + d*120, 20*3600, headway)):
+            v = f"{line}_{d}_{k}"; t = dep; times = {}
+            E(t - 60, "TransitDriverStarts", driverId=f"pt_{v}", vehicleId=v, transitLineId=line, transitRouteId=f"{line}_{d}", departureId=v)
+            for s, (sid, *_ ) in enumerate(seq):
+                E(t, "VehicleArrivesAtFacility", vehicle=v, facility=sid); times[sid] = t
+                E(t+30, "VehicleDepartsAtFacility", vehicle=v, facility=sid); t += 30
+                if s + 1 < len(seq):
+                    E(t + 1, "entered link", vehicle=v, link=f"pt_{sid}_{seq[s+1][0]}"); t += hop
+            track_times.setdefault((line, d), []).append((v, times))
 
 bike_trips = []  # PubliBike trips are played out afterwards, in time order, so station stocks stay right
 TELE = {"walk": 1.3, "bike": 4.2, "publibike": 4.0, "car_passenger": 8.0, "truck": 9.0, "outside": 12.0, "remote_walk": 1.3}
@@ -87,6 +130,26 @@ for p in range(3000):
             for lid in path(a, b): t += rnd.uniform(25, 60); E(t, "entered link", vehicle=pid, link=lid)
             E(t+20, "PersonLeavesVehicle", person=pid, vehicle=pid); t += 20
             E(t, "arrival", person=pid, link=link_at(*b), legMode="car")
+        elif mode == "pt" and rnd.random() < 0.5:
+            line, _, stops, *_ = rnd.choice(TRACK_LINES)
+            ia, ib = rnd.sample(range(len(stops)), 2); d = 0 if ia < ib else 1
+            (sa, xa, ya), (sb, xb, yb) = stops[ia], stops[ib]
+            run = next(((v, tm) for v, tm in track_times[(line, d)] if tm[sa] > t0 + 300), None)
+            if run is None: continue
+            v, tm = run
+            E(t0, "departure", person=pid, link=link_at(*a), legMode="walk")
+            E(t0+300, "arrival", person=pid, link=f"pt_{sa}_{stops[ia+1 if ia+1 < len(stops) else ia-1][0]}", legMode="walk")
+            E(t0+300, "actstart", person=pid, link="", actType="pt interaction", x=str(xa), y=str(ya))
+            E(t0+300, "actend", person=pid, link="", actType="pt interaction", x=str(xa), y=str(ya))
+            E(t0+300, "departure", person=pid, link="", legMode="pt")
+            E(tm[sa]+5, "PersonEntersVehicle", person=pid, vehicle=v)
+            ta = tm[sb] + 5
+            E(ta, "PersonLeavesVehicle", person=pid, vehicle=v)
+            E(ta, "arrival", person=pid, link="", legMode="pt")
+            E(ta, "actstart", person=pid, link="", actType="pt interaction", x=str(xb), y=str(yb))
+            E(ta, "actend", person=pid, link="", actType="pt interaction", x=str(xb), y=str(yb))
+            E(ta, "departure", person=pid, link="", legMode="walk")
+            t = ta + 300; E(t, "arrival", person=pid, link=link_at(*b), legMode="walk")
         elif mode == "pt":
             s_a = min(range(len(STOPS)), key=lambda s: abs(STOPS[s][0]-a[0]))
             s_b = min(range(len(STOPS)), key=lambda s: abs(STOPS[s][0]-b[0]))
