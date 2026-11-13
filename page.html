@@ -203,7 +203,7 @@ const modes = DATA.modes.map(m => {
   return { id: m, name, colour, size, alpha, walking: /walk/.test(m), shown: true, count: 0 };
 });
 
-// Trains and trams: a leg may name tracks ([point, track, ...]) to follow from that point to the
+// Trains, trams and walks: a leg may name tracks ([point, track, ...]) to follow from that point to the
 // next. Each track is stored once, its coordinates as steps from the previous point; here its points get
 // times in proportion to distance.
 const undelta = v => { const o = v.slice(); for (let i = 1; i < o.length; i++) o[i] += o[i - 1]; return o; };
