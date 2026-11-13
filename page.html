@@ -203,7 +203,33 @@ const modes = DATA.modes.map(m => {
   return { id: m, name, colour, size, alpha, walking: /walk/.test(m), shown: true, count: 0 };
 });
 
-const legs = DATA.legs.map(([m, t, x, y, r]) => ({ m, t, x: x.map(v => v / 1e5), y: y.map(v => v / 1e5), routed: r === 1 }));
+// Trains and trams: a leg may name tracks ([point, track, ...]) to follow from that point to the
+// next. Each track is stored once, its coordinates as steps from the previous point; here its points get
+// times in proportion to distance.
+const undelta = v => { const o = v.slice(); for (let i = 1; i < o.length; i++) o[i] += o[i - 1]; return o; };
+const TRACKS = (DATA.tracks || []).map(([x, y]) => [undelta(x), undelta(y)]);
+function onTracks(t, x, y, refs) {
+  if (!refs) return [t, x, y];
+  const nt = [], nx = [], ny = [];
+  let j = 0;
+  for (let i = 0; i < t.length; i++) {
+    nt.push(t[i]); nx.push(x[i]); ny.push(y[i]);
+    if (refs[j] !== i || i + 1 >= t.length) continue;
+    const [tx, ty] = TRACKS[refs[j + 1]]; j += 2;
+    const px = [x[i], ...tx, x[i + 1]], py = [y[i], ...ty, y[i + 1]];
+    const k = Math.cos(y[i] / 1e5 * Math.PI / 180), cum = [0];
+    for (let n = 1; n < px.length; n++) cum.push(cum[n - 1] + Math.hypot((px[n] - px[n - 1]) * k, py[n] - py[n - 1]));
+    const total = cum[cum.length - 1] || 1;
+    for (let n = 1; n < px.length - 1; n++) {
+      nt.push(t[i] + (t[i + 1] - t[i]) * cum[n] / total); nx.push(px[n]); ny.push(py[n]);
+    }
+  }
+  return [nt, nx, ny];
+}
+const legs = DATA.legs.map(([m, t0, x0, y0, r, refs]) => {
+  const [t, x, y] = onTracks(t0, x0, y0, refs);
+  return { m, t, x: x.map(v => v / 1e5), y: y.map(v => v / 1e5), routed: r === 1 };
+});
 legs.forEach(l => modes[l.m].count++);
 const order = modes.map((_, i) => i).sort((a, b) => modes[b].count - modes[a].count);
 const tMin = legs.length ? legs[0].t[0] : 0;
