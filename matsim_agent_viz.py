@@ -708,27 +708,30 @@ def walk_tracks(legs, crs: CRS) -> dict:
                           WALK_SIMPLIFY_M, "walk")
 
 
-def shortest_paths(legs, graph, X, Y, tree, snap_m, limit, tol, name):
-    """Route two-point legs on an undirected graph (scipy sparse, nodes at X, Y, k-d tree `tree` over
-    its nodes). `limit(beeline)` is the highest cost a path may have. Adds a hop to each
+def shortest_paths(legs, graph, X, Y, tree, snap_m, limit, tol, name, directed=False):
+    """Route two-point legs on a graph (scipy sparse, nodes at X, Y, k-d tree `tree` over the nodes it
+    may start or end at). `limit(beeline)` is the highest cost a path may have. Adds a hop to each
     leg that gets a path and returns {(name, n): [(x, y), ...]}."""
     import numpy as np
     from scipy.sparse.csgraph import dijkstra
     ends = np.array([p[1:] for leg in legs for p in leg["pts"]])
     dist, node = tree.query(ends, distance_upper_bound=snap_m)
     ok = np.isfinite(dist).reshape(-1, 2).all(axis=1).tolist()
+    ids = getattr(tree, "node_ids", None)  # tree over some of the nodes: map back to graph nodes
+    if ids is not None:
+        node = ids[np.minimum(node, len(ids) - 1)]
     snapped = node.reshape(-1, 2).tolist()
-    # one search per shared end (many walks start or end at one stop)
+    # one search per start; on an undirected graph, per shared end (many walks start or end at one stop)
     uses = Counter(v for pair, good in zip(snapped, ok) if good for v in pair)
     groups = {}
     for k, ((u, v), good) in enumerate(zip(snapped, ok)):
         if good and u != v:
-            src, dst, rev = (v, u, True) if uses[v] > uses[u] else (u, v, False)
+            src, dst, rev = (v, u, True) if not directed and uses[v] > uses[u] else (u, v, False)
             groups.setdefault(src, []).append((k, dst, rev))
     tracks = {}
     for src, group in groups.items():
         caps = [limit(math.dist(legs[k]["pts"][0][1:], legs[k]["pts"][1][1:])) for k, _, _ in group]
-        d, pred = dijkstra(graph, directed=False, indices=src, limit=max(caps), return_predecessors=True)
+        d, pred = dijkstra(graph, directed=directed, indices=src, limit=max(caps), return_predecessors=True)
         for (k, dst, rev), cap in zip(group, caps):
             if not d[dst] <= cap:
                 continue
