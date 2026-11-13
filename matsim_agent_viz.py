@@ -638,9 +638,10 @@ def walk_graph(tiles: list[dict], crs: CRS):
         for u, v in zip(r, r[1:]):
             d = math.hypot(x[v] - x[u], y[v] - y[u])
             steps = int(d // WALK_STEP_M)
-            for s in range(1, steps + 1):  # extra points on long segments
+            x0, y0, dx, dy = x[u], y[u], x[v] - x[u], y[v] - y[u]
+            for s in range(1, steps + 1):  # extra points on long segments, evenly spaced
                 f = s / (steps + 1)
-                x.append(x[u] + (x[v] - x[u]) * f); y.append(y[u] + (y[v] - y[u]) * f)
+                x.append(x0 + dx * f); y.append(y0 + dy * f)
                 a.append(u); b.append(len(x) - 1); u = len(x) - 1
             a.append(u); b.append(v)
     x, y, a, b = np.array(x), np.array(y), np.array(a, dtype=np.int64), np.array(b, dtype=np.int64)
@@ -653,8 +654,6 @@ def walk_graph(tiles: list[dict], crs: CRS):
 def walk_tracks(legs, crs: CRS) -> dict:
     """Give the sampled walks a path on OSM footpaths: adds a hop to each walk leg that gets one and
     returns {("walk", n): [(x, y), ...]}, in run coordinates."""
-    import numpy as np
-    from scipy.sparse.csgraph import dijkstra
     if crs.is_geographic:
         say("note: the run's coordinates are in degrees, not metres; walkers move in straight lines")
         return {}
@@ -695,33 +694,30 @@ def walk_tracks(legs, crs: CRS) -> dict:
     graph, X, Y, tree = walk_graph(tiles, crs)
     # cost in metres; give up on long detours (e.g. a start snapped to the wrong side of a river)
     return shortest_paths(walks, graph, X, Y, tree, WALK_SNAP_M, lambda beeline: 2.5 * beeline + 500,
-                          WALK_SIMPLIFY_M, "walk", directed=False)
+                          WALK_SIMPLIFY_M, "walk")
 
 
-def shortest_paths(legs, graph, X, Y, tree, snap_m, limit, tol, name, directed):
-    """Route two-point legs on a graph (scipy sparse, nodes at X, Y, k-d tree `tree` over the nodes it
-    may start or end at). `limit(beeline)` is the highest cost a path may have. Adds a hop to each
+def shortest_paths(legs, graph, X, Y, tree, snap_m, limit, tol, name):
+    """Route two-point legs on an undirected graph (scipy sparse, nodes at X, Y, k-d tree `tree` over
+    its nodes). `limit(beeline)` is the highest cost a path may have. Adds a hop to each
     leg that gets a path and returns {(name, n): [(x, y), ...]}."""
     import numpy as np
     from scipy.sparse.csgraph import dijkstra
     ends = np.array([p[1:] for leg in legs for p in leg["pts"]])
     dist, node = tree.query(ends, distance_upper_bound=snap_m)
     ok = np.isfinite(dist).reshape(-1, 2).all(axis=1).tolist()
-    ids = getattr(tree, "node_ids", None)  # tree over some of the nodes: map back to graph nodes
-    if ids is not None:
-        node = ids[np.minimum(node, len(ids) - 1)]
     snapped = node.reshape(-1, 2).tolist()
-    # one search per start; on an undirected graph, per shared end (many walks start or end at one stop)
+    # one search per shared end (many walks start or end at one stop)
     uses = Counter(v for pair, good in zip(snapped, ok) if good for v in pair)
     groups = {}
     for k, ((u, v), good) in enumerate(zip(snapped, ok)):
         if good and u != v:
-            src, dst, rev = (v, u, True) if not directed and uses[v] > uses[u] else (u, v, False)
+            src, dst, rev = (v, u, True) if uses[v] > uses[u] else (u, v, False)
             groups.setdefault(src, []).append((k, dst, rev))
     tracks = {}
     for src, group in groups.items():
         caps = [limit(math.dist(legs[k]["pts"][0][1:], legs[k]["pts"][1][1:])) for k, _, _ in group]
-        d, pred = dijkstra(graph, directed=directed, indices=src, limit=max(caps), return_predecessors=True)
+        d, pred = dijkstra(graph, directed=False, indices=src, limit=max(caps), return_predecessors=True)
         for (k, dst, rev), cap in zip(group, caps):
             if not d[dst] <= cap:
                 continue
