@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pyproj"]
+# dependencies = ["pyproj", "scipy"]
 # ///
 """3D map animation of the last iteration: agents as dots, by mode.
 
@@ -26,7 +26,12 @@ How positions are built:
     OpenStreetMap (downloaded from Overpass once, cached in
     ~/.cache/matsim-agent-viz/rail), because their network links are often
     straight lines; --no-rail turns this off;
-  * teleported modes (walk, bike, PubliBike, car_passenger, ...): a straight
+  * walks: along OpenStreetMap footpaths and streets (cached in
+    ~/.cache/matsim-agent-viz/walk), keeping MATSim's start and end times;
+    --no-walk turns this off;
+  * car passengers: the fastest path on the run's car links, like the cars;
+    --no-passenger turns this off;
+  * other teleported modes (bike, PubliBike, ...): a straight
     line from start to end, at constant speed, because MATSim does not
     simulate their movement;
   * agents are sampled with a stable hash of the person id (--sample).
@@ -53,6 +58,8 @@ Options:
   --events/--network/--schedule/--config/--sharing FILE
                   use this file instead of the one in the run folder
   --no-rail       trains and trams use the run's own links, no download
+  --no-walk       walkers move in straight lines, no download
+  --no-passenger  car passengers move in straight lines
   --no-open       only write the page
 """
 
@@ -245,18 +252,26 @@ def guess_swiss_crs(points) -> CRS:
 
 
 def read_network(path: Path):
-    nodes, links = {}, {}
+    """Link start and middle points, and the car links as (from node, to node, length, freespeed),
+    with the node coordinates: {"nodes": {id: (x, y)}, "links": [...]}."""
+    nodes, links, car = {}, {}, []
     for el in iter_elements(path, {"node", "link"}, "Reading the network"):
         if el.tag == "node":
             nodes[el.get("id")] = (float(el.get("x")), float(el.get("y")))
         else:
-            links[el.get("id")] = (el.get("from"), el.get("to"))
+            a, b = el.get("from"), el.get("to")
+            links[el.get("id")] = (a, b)
+            if "car" in (el.get("modes") or "car").split(","):
+                try:
+                    car.append((a, b, float(el.get("length")), float(el.get("freespeed"))))
+                except (TypeError, ValueError):
+                    pass
     if not nodes or not links:
         fail(f"{path.name} has no nodes or links. Is it a MATSim network?")
     link_from = {l: nodes[a] for l, (a, b) in links.items() if a in nodes}
     link_mid = {l: ((nodes[a][0] + nodes[b][0]) / 2, (nodes[a][1] + nodes[b][1]) / 2)
                 for l, (a, b) in links.items() if a in nodes and b in nodes}
-    return link_from, link_mid
+    return link_from, link_mid, {"nodes": nodes, "links": car}
 
 
 def read_sharing_stations(path: Path, run_dir: Path, config: Path | None, link_mid):
@@ -584,6 +599,204 @@ def rail_tracks(hops: set, stops: dict, crs: CRS) -> dict:
     return out
 
 
+# ---------------------------------------------------------------- footpaths
+# MATSim teleports walkers: it knows only where and when a walk starts and ends. To draw walkers on the
+# street, the script downloads the walkable ways of OpenStreetMap (footways, pedestrian zones, steps,
+# paths and streets) in small tiles where sampled agents walk, and gives each walk its shortest path.
+# The start and end times stay MATSim's; only the shape changes.
+WALK_CACHE = Path.home() / ".cache" / "matsim-agent-viz" / "walk"  # OSM ways per WALK_TILE tile, public data
+WALK_WAYS = ("footway|pedestrian|path|steps|living_street|residential|service|unclassified|track|cycleway|"
+             "corridor|platform|tertiary|tertiary_link|secondary|secondary_link|primary|primary_link")
+WALK_TILE = 0.05        # degrees: about 5.5 x 3.8 km in Switzerland
+MAX_WALK_TILES = 40     # the tiles with most walks get paths, the other walks stay straight
+WALK_SNAP_M = 250       # a walk's start or end looks for a path this close
+WALK_STEP_M = 25        # long path segments get extra points this far apart, so start and end snap close
+MAX_WALK_M = 5000       # longer walks stay straight
+WALK_SIMPLIFY_M = 5.0
+
+
+def is_walk(mode: str) -> bool:
+    return "walk" in mode.lower()
+
+
+def walk_tile(i: int, j: int) -> dict | None:
+    """OSM ways a pedestrian may use, in the tile (i, j) of WALK_TILE degrees (south-west corner i, j)."""
+    s, w = round(i * WALK_TILE, 4), round(j * WALK_TILE, 4)
+    n, e = round(s + WALK_TILE, 4), round(w + WALK_TILE, 4)
+    query = (f'[out:json][timeout:240];way["highway"~"^({WALK_WAYS})$"]["foot"!~"^(no|private)$"]'
+             f'["access"!~"^(no|private)$"]({s},{w},{n},{e})->.w;.w out skel qt;node(w.w);out skel qt;')
+    return osm_tile(WALK_CACHE / f"{i}_{j}.json.gz", query, "footpaths")
+
+
+def walk_graph(tiles: list[dict], crs: CRS):
+    """Walkable ways as a sparse graph in the run's coordinates. Returns (graph, x, y, k-d tree of nodes)."""
+    import numpy as np
+    from scipy.sparse import csr_matrix
+    from scipy.spatial import cKDTree
+    ids, lons, lats, ways = {}, [], [], {}
+    for data in tiles:
+        for el in data.get("elements", []):
+            if el["type"] == "node":
+                if el["id"] not in ids:
+                    ids[el["id"]] = len(lons); lons.append(el["lon"]); lats.append(el["lat"])
+            elif el["type"] == "way":
+                ways[el["id"]] = el["nodes"]
+    x, y = Transformer.from_crs(4326, crs, always_xy=True).transform(lons, lats)
+    x, y = list(x), list(y)
+    a, b = [], []
+    for refs in ways.values():
+        r = [ids[n] for n in refs if n in ids]
+        for u, v in zip(r, r[1:]):
+            d = math.hypot(x[v] - x[u], y[v] - y[u])
+            steps = int(d // WALK_STEP_M)
+            x0, y0, dx, dy = x[u], y[u], x[v] - x[u], y[v] - y[u]
+            for s in range(1, steps + 1):  # extra points on long segments, evenly spaced
+                f = s / (steps + 1)
+                x.append(x0 + dx * f); y.append(y0 + dy * f)
+                a.append(u); b.append(len(x) - 1); u = len(x) - 1
+            a.append(u); b.append(v)
+    x, y, a, b = np.array(x), np.array(y), np.array(a, dtype=np.int64), np.array(b, dtype=np.int64)
+    w = np.hypot(x[a] - x[b], y[a] - y[b]) + 1e-3  # zero weights would read as "no edge"
+    n = len(x)
+    graph = csr_matrix((np.r_[w, w], (np.r_[a, b], np.r_[b, a])), shape=(n, n))
+    return graph, x, y, cKDTree(np.c_[x, y])
+
+
+def walk_tracks(legs, crs: CRS) -> dict:
+    """Give the sampled walks a path on OSM footpaths: adds a hop to each walk leg that gets one and
+    returns {("walk", n): [(x, y), ...]}, in run coordinates."""
+    if crs.is_geographic:
+        say("note: the run's coordinates are in degrees, not metres; walkers move in straight lines")
+        return {}
+    walks = [leg for leg in legs if is_walk(leg["mode"]) and not leg.get("routed") and len(leg["pts"]) == 2
+             and 30 < math.dist(leg["pts"][0][1:], leg["pts"][1][1:]) < MAX_WALK_M]
+    if not walks:
+        return {}
+    to_wgs = Transformer.from_crs(crs, 4326, always_xy=True)
+    xs = [p[1] for leg in walks for p in leg["pts"]]
+    ys = [p[2] for leg in walks for p in leg["pts"]]
+    lons, lats = to_wgs.transform(xs, ys)
+    need = []  # tiles each walk needs: those of its bounding box
+    count = Counter()
+    for k in range(len(walks)):
+        i0, i1 = sorted((math.floor(lats[2 * k] / WALK_TILE), math.floor(lats[2 * k + 1] / WALK_TILE)))
+        j0, j1 = sorted((math.floor(lons[2 * k] / WALK_TILE), math.floor(lons[2 * k + 1] / WALK_TILE)))
+        t = {(i, j) for i in range(i0, i1 + 1) for j in range(j0, j1 + 1)}
+        need.append(t)
+        count.update(t)
+    chosen = {t for t, _ in count.most_common(MAX_WALK_TILES)}
+    if len(count) > MAX_WALK_TILES:
+        say(f"note: the walks cover {len(count)} map tiles; the {MAX_WALK_TILES} with most walks get footpaths, "
+            "walks elsewhere stay straight")
+    tiles, loaded = [], set()
+    for n, (i, j) in enumerate(sorted(chosen)):
+        if not (WALK_CACHE / f"{i}_{j}.json.gz").is_file():
+            say(f"  downloading footpaths from OpenStreetMap, tile {n + 1} of {len(chosen)} ...")
+        progress(f"Footpaths: tile {n + 1} of {len(chosen)}")
+        tile = walk_tile(i, j)
+        if tile is None:
+            say("note: walks where footpaths are missing stay straight")
+            break
+        tiles.append(tile); loaded.add((i, j))
+    walks = [leg for leg, t in zip(walks, need) if t <= loaded]
+    if not tiles or not walks:
+        return {}
+    progress("Routing walks on the footpaths")
+    graph, X, Y, tree = walk_graph(tiles, crs)
+    # cost in metres; give up on long detours (e.g. a start snapped to the wrong side of a river)
+    return shortest_paths(walks, graph, X, Y, tree, WALK_SNAP_M, lambda beeline: 2.5 * beeline + 500,
+                          WALK_SIMPLIFY_M, "walk")
+
+
+def shortest_paths(legs, graph, X, Y, tree, snap_m, limit, tol, name, directed=False):
+    """Route two-point legs on a graph (scipy sparse, nodes at X, Y, k-d tree `tree` over the nodes it
+    may start or end at). `limit(beeline)` is the highest cost a path may have. Adds a hop to each
+    leg that gets a path and returns {(name, n): [(x, y), ...]}."""
+    import numpy as np
+    from scipy.sparse.csgraph import dijkstra
+    ends = np.array([p[1:] for leg in legs for p in leg["pts"]])
+    dist, node = tree.query(ends, distance_upper_bound=snap_m)
+    ok = np.isfinite(dist).reshape(-1, 2).all(axis=1).tolist()
+    ids = getattr(tree, "node_ids", None)  # tree over some of the nodes: map back to graph nodes
+    if ids is not None:
+        node = ids[np.minimum(node, len(ids) - 1)]
+    snapped = node.reshape(-1, 2).tolist()
+    # one search per start; on an undirected graph, per shared end (many walks start or end at one stop)
+    uses = Counter(v for pair, good in zip(snapped, ok) if good for v in pair)
+    groups = {}
+    for k, ((u, v), good) in enumerate(zip(snapped, ok)):
+        if good and u != v:
+            src, dst, rev = (v, u, True) if not directed and uses[v] > uses[u] else (u, v, False)
+            groups.setdefault(src, []).append((k, dst, rev))
+    tracks = {}
+    for src, group in groups.items():
+        caps = [limit(math.dist(legs[k]["pts"][0][1:], legs[k]["pts"][1][1:])) for k, _, _ in group]
+        d, pred = dijkstra(graph, directed=directed, indices=src, limit=max(caps), return_predecessors=True)
+        for (k, dst, rev), cap in zip(group, caps):
+            if not d[dst] <= cap:
+                continue
+            path = [dst]
+            while path[-1] != src and len(path) < 1_000_000:
+                path.append(int(pred[path[-1]]))
+            if not rev:
+                path.reverse()
+            key = (name, len(tracks))
+            tracks[key] = simplify([(float(X[n]), float(Y[n])) for n in path], tol)
+            legs[k]["hops"] = [(0, 1, key)]
+    return tracks
+
+
+# ---------------------------------------------------------------- car passengers
+# MATSim teleports car passengers too. They follow the fastest path on the run's own car links
+# (free-flow travel times), so they drive where the cars drive. No download.
+PASSENGER_SNAP_M = 1000
+LOCAL_SPEED = 60 / 3.6  # passengers get on and off at nodes of roads this slow or slower, not on motorways
+
+
+def is_passenger(mode: str) -> bool:
+    m = mode.lower()
+    return "passenger" in m or m == "ride"
+
+
+def passenger_tracks(legs, roads) -> dict:
+    """Give the sampled car-passenger legs a path on the run's car links (see shortest_paths)."""
+    import numpy as np
+    from scipy.sparse import csr_matrix
+    from scipy.spatial import cKDTree
+    rides = [leg for leg in legs if is_passenger(leg["mode"]) and not leg.get("routed") and len(leg["pts"]) == 2]
+    if not rides or not roads["links"]:
+        return {}
+    progress("Routing car passengers on the roads")
+    idx, xy = {}, []
+    for n, p in roads["nodes"].items():
+        idx[n] = len(xy); xy.append(p)
+    w, local = {}, set()  # parallel links: keep the fastest (the matrix would add them up)
+    for u, v, length, speed in roads["links"]:
+        if u in idx and v in idx and speed > 0:
+            e = (idx[u], idx[v]); w[e] = min(w.get(e, math.inf), max(length, 0.1) / speed)
+            if speed <= LOCAL_SPEED:
+                local.update((idx[u], idx[v]))
+    if not local:
+        return {}
+    xy = np.array(xy)
+    graph = csr_matrix((list(w.values()), tuple(zip(*w))), shape=(len(xy), len(xy)))
+    stops = np.array(sorted(local))
+
+    class Local:  # k-d tree over the local road nodes, answering with network node numbers
+        node_ids = stops
+        tree = cKDTree(xy[stops])
+        def query(self, pts, distance_upper_bound):
+            return self.tree.query(pts, distance_upper_bound=distance_upper_bound)
+
+    # cost in seconds at free flow: allow a path up to about 3x slower than a straight line at 30 km/h
+    tracks = shortest_paths(rides, graph, xy[:, 0], xy[:, 1], Local(), PASSENGER_SNAP_M,
+                            lambda beeline: beeline / 3 + 300, SIMPLIFY_M, "ride", directed=True)
+    for leg in rides:
+        if leg.get("hops"):
+            leg["routed"] = True  # a path like a car's: it gets a trip line
+    return tracks
+
+
 # ---------------------------------------------------------------- events
 # shared_mobility contrib events -> kind in the page (0 pickup, 1 dropoff, 2 failed pickup, 3 failed dropoff)
 SHARING_EVENTS = {"sharing vehicle pickup": 0, "sharing vehicle dropoff": 1,
@@ -793,7 +1006,7 @@ def to_payload(legs, crs: CRS, sharing=None, tracks=None):
     starts_lon.sort(); starts_lat.sort()
     centre = [starts_lon[len(starts_lon) // 2], starts_lat[len(starts_lat) // 2]]
     payload = {"modes": modes, "legs": out, "centre": centre}
-    if tracks:  # train and tram paths, each stored once: [[lon, Δlon, ...], [lat, Δlat, ...]]
+    if tracks:  # train, tram and walk paths, each stored once: [[lon, Δlon, ...], [lat, Δlat, ...]]
         payload["tracks"] = []
         for line in tracks.values():
             lons, lats = tf.transform(*zip(*line))
@@ -818,9 +1031,12 @@ SETTINGS = Path.home() / ".config" / "matsim-agent-viz" / "launcher.json"
 
 
 def build(run_dir: Path, files: dict[str, Path | None], out: Path, sample: float = 0.1,
-          title: str | None = None, crs: str | None = None, rail: bool = True) -> Path:
+          title: str | None = None, crs: str | None = None, rail: bool = True, walk: bool = True,
+          passengers: bool = True) -> Path:
     """Read the run and write the page. `files` maps INPUTS roles to paths (None = not there).
-    With `rail`, trains and trams follow OpenStreetMap tracks between stops (downloaded once, then cached)."""
+    With `rail`, trains and trams follow OpenStreetMap tracks between stops; with `walk`, walkers follow
+    OpenStreetMap footpaths (both downloaded once, then cached); with `passengers`, car passengers follow
+    the run's car links."""
     if not 0 < sample <= 1:
         fail("sample must be between 0 and 1.")
     for role, (name, required, _) in INPUTS.items():
@@ -839,7 +1055,7 @@ def build(run_dir: Path, files: dict[str, Path | None], out: Path, sample: float
     else:
         crs_obj = read_crs(config)
     say("reading network ...")
-    link_from, link_mid = read_network(network)
+    link_from, link_mid, roads = read_network(network)
     if crs_obj is None:
         crs_obj = guess_swiss_crs(link_mid.values())
     if schedule is not None:
@@ -863,6 +1079,21 @@ def build(run_dir: Path, files: dict[str, Path | None], out: Path, sample: float
         say(f"routing {len(hops):,} train and tram hops on OpenStreetMap tracks ...")
         tracks = rail_tracks(hops, stops, crs_obj)
         say(f"  {len(tracks):,} of {len(hops):,} hops follow the tracks, the rest go straight between stops")
+    if walk:
+        n_walks = sum(is_walk(leg["mode"]) for leg in legs)
+        if n_walks:
+            say(f"routing {n_walks:,} walks on OpenStreetMap footpaths ...")
+            paths = walk_tracks(legs, crs_obj)
+            tracks.update(paths)
+            say(f"  {len(paths):,} of {n_walks:,} walks follow footpaths, the rest go straight")
+    if passengers:
+        n_rides = sum(is_passenger(leg["mode"]) for leg in legs)
+        if n_rides:
+            say(f"routing {n_rides:,} car passenger legs on the road network ...")
+            paths = passenger_tracks(legs, roads)
+            tracks.update(paths)
+            say(f"  {len(paths):,} of {n_rides:,} follow the roads, the rest go straight")
+    del roads
 
     progress("Writing the page")
     payload = to_payload(legs, crs_obj, sharing, tracks)
@@ -902,6 +1133,10 @@ def main():
         ap.add_argument(f"--{role}", type=Path, help=f"use this file instead of the one found in the run folder ({use})")
     ap.add_argument("--no-rail", action="store_true",
                     help="don't route trains and trams along OpenStreetMap tracks (no download)")
+    ap.add_argument("--no-walk", action="store_true",
+                    help="walkers move in straight lines, no footpath download")
+    ap.add_argument("--no-passenger", action="store_true",
+                    help="car passengers move in straight lines instead of on the road network")
     ap.add_argument("--view", action="store_true", help="open the existing page in your browser, no rebuild")
     ap.add_argument("--no-open", action="store_true", help="only write the page, don't open it")
     ap.add_argument("--open", action="store_true", help=argparse.SUPPRESS)  # old flag: opening is the default now
@@ -923,7 +1158,8 @@ def main():
     files.update({role: getattr(args, role) for role in INPUTS if getattr(args, role)})
     if args.config and not args.sharing:  # the sharing file comes from whichever config is used
         files["sharing"] = sharing_for(run_dir, args.config)
-    build(run_dir, files, out, args.sample, args.title, args.crs, rail=not args.no_rail)
+    build(run_dir, files, out, args.sample, args.title, args.crs, rail=not args.no_rail, walk=not args.no_walk,
+          passengers=not args.no_passenger)
     if args.no_open:
         print("To watch it later without rebuilding, add --view.")
     else:
