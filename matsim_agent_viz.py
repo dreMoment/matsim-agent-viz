@@ -203,19 +203,42 @@ def iter_elements(path: Path, tags: set[str], step: str | None = None):
 # ---------------------------------------------------------------- static inputs
 UNSET_CRS = {"", "atlantis", "none"}  # "Atlantis" is MATSim's default for "not set"
 
+# MATSim's own short names (MGC in matsim core) that pyproj does not know. WGS84_UTMnnN/S is handled below.
+MATSIM_CRS = {
+    "gk4": "EPSG:31468", "dhdn_gk4": "EPSG:31468",
+    "ch1903_lv03": "EPSG:21781", "ch1903_lv03_gt": "EPSG:21781",
+    "ch1903_lv03_plus": "EPSG:2056", "ch1903_lv03_plus_gt": "EPSG:2056",
+    "wgs84": "EPSG:4326", "pseudo_mercator": "EPSG:3857",
+    "wgs84_svy21": "EPSG:3414", "nad83_utm17n": "EPSG:26917",
+}
+
+
+def parse_crs(value: str | None) -> CRS | None:
+    """A CRS from an EPSG code, a proj string or one of MATSim's names (GK4, CH1903_LV03_Plus, ...).
+    None if it is not set ("Atlantis"). Raises ValueError if it cannot be read."""
+    v = (value or "").strip()
+    if v.lower() in UNSET_CRS:
+        return None
+    if m := re.fullmatch(r"wgs84_utm(\d{1,2})([ns])", v.lower()):
+        v = f"EPSG:{(32600 if m[2] == 'n' else 32700) + int(m[1])}"
+    v = MATSIM_CRS.get(v.lower(), v)
+    try:
+        return CRS.from_user_input(v)
+    except Exception:
+        raise ValueError(value) from None
+
 
 def read_crs(config: Path | None) -> CRS | None:
     """CRS from output_config, or None if it is not set."""
     if config is not None:
         for el in iter_elements(config, {"param"}):
             if el.get("name") == "coordinateSystem":
-                value = (el.get("value") or "").strip()
-                if value.lower() in UNSET_CRS:
-                    return None
+                value = el.get("value")
                 try:
-                    return CRS.from_user_input(value)
-                except Exception:
-                    fail(f"cannot interpret coordinateSystem '{value}' from {config.name}.")
+                    return parse_crs(value)
+                except ValueError:
+                    fail(f"cannot interpret coordinateSystem '{value}' from {config.name}. "
+                         "Add --crs EPSG:xxxx.")
     return None
 
 
@@ -252,13 +275,14 @@ def guess_swiss_crs(points) -> CRS:
 
 
 def read_network(path: Path):
-    """Link start and middle points, and the car links as (from node, to node, length, freespeed),
-    with the node coordinates: {"nodes": {id: (x, y)}, "links": [...]}."""
-    nodes, links, car = {}, {}, []
-    for el in iter_elements(path, {"node", "link"}, "Reading the network"):
+    """Link start and middle points, the car links as (from node, to node, length, freespeed) with the
+    node coordinates: {"nodes": {id: (x, y)}, "links": [...]}, and the CRS the network names in its own
+    attributes (or None)."""
+    nodes, links, car, crs = {}, {}, [], None
+    for el in iter_elements(path, {"node", "link", "attribute"}, "Reading the network"):
         if el.tag == "node":
             nodes[el.get("id")] = (float(el.get("x")), float(el.get("y")))
-        else:
+        elif el.tag == "link":
             a, b = el.get("from"), el.get("to")
             links[el.get("id")] = (a, b)
             if "car" in (el.get("modes") or "car").split(","):
@@ -266,12 +290,14 @@ def read_network(path: Path):
                     car.append((a, b, float(el.get("length")), float(el.get("freespeed"))))
                 except (TypeError, ValueError):
                     pass
+        elif not nodes and el.get("name") == "coordinateReferenceSystem":  # network attributes come first
+            crs = (el.text or "").strip() or None
     if not nodes or not links:
         fail(f"{path.name} has no nodes or links. Is it a MATSim network?")
     link_from = {l: nodes[a] for l, (a, b) in links.items() if a in nodes}
     link_mid = {l: ((nodes[a][0] + nodes[b][0]) / 2, (nodes[a][1] + nodes[b][1]) / 2)
                 for l, (a, b) in links.items() if a in nodes and b in nodes}
-    return link_from, link_mid, {"nodes": nodes, "links": car}
+    return link_from, link_mid, {"nodes": nodes, "links": car}, crs
 
 
 def read_sharing_stations(path: Path, run_dir: Path, config: Path | None, link_mid):
@@ -1049,13 +1075,20 @@ def build(run_dir: Path, files: dict[str, Path | None], out: Path, sample: float
 
     if crs:
         try:
-            crs_obj = CRS.from_user_input(crs)
-        except Exception:
+            crs_obj = parse_crs(crs)
+        except ValueError:
             fail(f"cannot interpret coordinate system '{crs}'. Use e.g. EPSG:2056.")
     else:
         crs_obj = read_crs(config)
     say("reading network ...")
-    link_from, link_mid, roads = read_network(network)
+    link_from, link_mid, roads, net_crs = read_network(network)
+    if crs_obj is None and net_crs is not None:
+        try:
+            crs_obj = parse_crs(net_crs)
+        except ValueError:
+            say(f"note: cannot interpret the network's coordinate system '{net_crs}', ignoring it")
+        if crs_obj is not None:
+            say(f"note: coordinate system not set in output_config, using {net_crs} from the network")
     if crs_obj is None:
         crs_obj = guess_swiss_crs(link_mid.values())
     if schedule is not None:

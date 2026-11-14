@@ -32,7 +32,7 @@ The page is written to `agents_3d.html` in the run folder (change this with `--o
 | `--out` | `<run-dir>/agents_3d.html` | HTML file to write |
 | `--sample` | `0.1` | share of agents to show (stable hash of the person id) |
 | `--title` | from the folder name | scenario name on the page |
-| `--crs` | from `output_config.xml` | e.g. `EPSG:2056`, if the config doesn't set one (an LV95/LV03 guess is the fallback) |
+| `--crs` | from `output_config.xml`, else the network | e.g. `EPSG:2056`, if the run doesn't set one (an LV95/LV03 guess is the fallback) |
 | `--events`, `--network`, `--schedule`, `--config`, `--sharing` | found in the run folder | use a file from somewhere else |
 | `--no-rail` | | trains and trams use the run's own links, no track download |
 | `--no-walk` | | walkers move in straight lines, no footpath download |
@@ -47,14 +47,14 @@ A full Zurich 10% run (49 M events) takes about 2.5 minutes. With `--sample 0.1`
 Plain or `.gz`, with or without a run-id prefix (`myrun.output_events.xml.gz`):
 
 - `output_events.xml.gz` (required): movements of the final iteration
-- `output_network.xml.gz` (required): link coordinates
+- `output_network.xml.gz` (required): link coordinates, and the coordinate system if the config doesn't set one
 - `output_transitSchedule.xml.gz` (optional): stop coordinates, and which routes are trains or trams. Without it, PT riders follow the network links only.
 - `output_config.xml` (optional): coordinate system (`global.coordinateSystem`) and last iteration number.
 - sharing service file (optional): stations and bikes of a station-based bike-sharing service (shared_mobility contrib), e.g. `publibike_service.xml`. The script follows `serviceInputFile` in the config's `sharing` module and looks for the file in the run folder, next to the config and in the folder above. Otherwise pass it with `--sharing`. With several station-based services, the first one found is shown; pass `--sharing` to pick another.
 
 It never reads the population, facilities or households files.
 
-**Coordinate system.** The script takes it from `--crs`, else from `output_config.xml`. If neither sets one, it can only guess the Swiss grids (LV95, LV03). For any other region, set `global.coordinateSystem` in the config or pass `--crs`, e.g. `--crs EPSG:25832`. A CRS stored inside the network file is not read.
+**Coordinate system.** The script takes it from `--crs`, else from `output_config.xml` (`global.coordinateSystem`), else from the network file's `coordinateReferenceSystem` attribute. EPSG codes work, and so do MATSim's own names such as `GK4`, `DHDN_GK4`, `CH1903_LV03_Plus` and `WGS84_UTM33N`. If none of these sets one, it can only guess the Swiss grids (LV95, LV03). For any other region, pass `--crs`, e.g. `--crs EPSG:25832`.
 
 **Events format.** Only the standard XML events file (plain or `.gz`) is supported.
 
