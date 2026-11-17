@@ -2,6 +2,10 @@
 
 A minimal 3D animation of the last iteration of a MATSim run. Each agent on a leg is a dot moving over a tilted map with terrain and 3D buildings. Dots are black by default, or coloured by mode.
 
+![Agents moving over central Zurich at 07:40, coloured by mode, with the paths of the trips in progress](docs/demo.gif)
+
+*The synthetic test run from `examples/make_fake_run.py --osm`, not real data.*
+
 One Python script reads the run's final outputs and writes a single HTML page. The map, terrain and building tiles come from OpenFreeMap and Mapterhorn (no API key), so the page needs internet. The simulation data stays inside the file.
 
 ## Usage
@@ -96,6 +100,8 @@ Any mode name works. Common ones (car, pt, bike, walk, and a few from the Swiss 
 uv run examples/make_fake_run.py /tmp/fake_run
 uv run matsim_agent_viz.py /tmp/fake_run --sample 1
 ```
+
+With `--osm`, the roads are central Zurich's real streets from OpenStreetMap instead of the grid, so cars and buses drive on real roads. The streets are downloaded once and cached in `~/.cache/matsim-agent-viz/demo_roads.json`. The GIF above was made this way, with `--sample 0.25`, at speed 1 and in presentation mode (`H`).
 
 ## Files
 

@@ -79,7 +79,8 @@ from pathlib import Path
 
 from pyproj import CRS, Transformer
 
-MIN_POINT_GAP_S = 10  # thin out link events closer together than this
+MIN_POINT_GAP_S = 10  # thin out link events closer together than this ...
+MERGE_TOL_M = 8.0     # ... but only where the dropped point lies this close to the path, so turns stay
 
 
 # ---------------------------------------------------------------- input checks
@@ -861,14 +862,16 @@ def build_legs(events: Path, sample: float, link_from, link_mid, stops, sharing=
 
     def add(person, t, xy, routed=False, keep=False):
         """Add a point to the person's open leg. Points closer in time than MIN_POINT_GAP_S replace
-        the last one, unless that one is kept (a train's stop, which a track hop starts from)."""
+        the last one if it lies on the way (within MERGE_TOL_M of the line from the one before to the
+        new point), unless that one is kept (a train's stop, which a track hop starts from)."""
         leg = open_leg.get(person)
         if leg is None or xy is None:
             return
         if routed:
             leg["routed"] = True
         pts = leg["pts"]
-        if pts and t - pts[-1][0] < MIN_POINT_GAP_S and len(pts) > 1 and leg.get("kept") != len(pts) - 1:
+        if (pts and t - pts[-1][0] < MIN_POINT_GAP_S and len(pts) > 1 and leg.get("kept") != len(pts) - 1
+                and len(simplify([pts[-2][1:], pts[-1][1:], xy], MERGE_TOL_M)) == 2):
             pts[-1] = (t, *xy)
         else:
             pts.append((t, *xy))
