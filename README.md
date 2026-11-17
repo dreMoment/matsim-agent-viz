@@ -2,7 +2,7 @@
 
 A minimal 3D animation of the last iteration of a MATSim run. Each agent on a leg is a dot moving over a tilted map with terrain and 3D buildings. Dots are black by default, or coloured by mode.
 
-![Agents moving over central Zurich at 07:45, coloured by mode, with trip lines and bike-sharing stations](docs/demo.gif)
+![Agents moving over central Zurich at 07:45, coloured by mode, with bike-sharing stations](docs/demo.gif)
 
 *The synthetic test run from `examples/make_fake_run.py`, not real data.*
 
