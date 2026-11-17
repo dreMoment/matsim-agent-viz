@@ -101,7 +101,7 @@ uv run examples/make_fake_run.py /tmp/fake_run
 uv run matsim_agent_viz.py /tmp/fake_run --sample 1
 ```
 
-With `--osm`, the roads are central Zurich's real streets from OpenStreetMap instead of the grid, so cars and buses drive on real roads. The streets are downloaded once and cached in `~/.cache/matsim-agent-viz/demo_roads.json`. The GIF above was made this way, at speed 1.
+With `--osm`, the roads are central Zurich's real streets from OpenStreetMap instead of the grid, so cars and buses drive on real roads. The streets are downloaded once and cached in `~/.cache/matsim-agent-viz/demo_roads.json`. The GIF above was made this way, with `--sample 0.25` and at speed 1.
 
 ## Files
 
