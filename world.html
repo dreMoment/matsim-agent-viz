@@ -1396,19 +1396,10 @@ const groundAt = (x, z, fallback) => { const h = heightAt(x, z); return isFinite
 function setMode(m) {
   if (m === camMode) return;
   if (m === 'orbit' && camMode === 'follow') {
-    // back to the map view, above where the ride ended
+    // back to the map view, above where the ride ended (if the ride never showed anyone, stay put)
     const a = follow.at;
-    orbit.target.set(a.x, a.y, a.z);
+    if (follow.ok) orbit.target.set(a.x, a.y, a.z);
     Object.assign(orbit, { dist: 450, yaw: isFinite(follow.yaw) ? follow.yaw : orbit.yaw, pitch: MAP_PITCH });
-  } else if (m === 'orbit') {
-    const d = new THREE.Vector3(); camera.getWorldDirection(d);
-    const g = groundAt(camera.position.x, camera.position.z, 0), alt = Math.max(20, camera.position.y - g);
-    const dist = d.y < -0.08 ? Math.min(4000, alt / -d.y) : Math.min(1500, alt * 3);
-    orbit.target.set(camera.position.x + d.x * dist, 0, camera.position.z + d.z * dist);
-    orbit.target.y = groundAt(orbit.target.x, orbit.target.z, g);
-    orbit.dist = camera.position.distanceTo(orbit.target);
-    orbit.yaw = Math.atan2(camera.position.x - orbit.target.x, camera.position.z - orbit.target.z);
-    orbit.pitch = Math.max(MIN_PITCH, Math.min(1.53, Math.asin((camera.position.y - orbit.target.y) / orbit.dist)));
   }
   if (camMode === 'follow' && m !== 'follow') { follow.li = -1; $('follow').hidden = true; }
   camMode = m;
@@ -1544,7 +1535,9 @@ canvas.addEventListener('wheel', e => {
   const f = Math.exp(Math.max(-60, Math.min(60, e.deltaY)) * 0.0022);
   if (camMode === 'orbit') {
     const nd = Math.max(6, Math.min(30000, orbit.dist * f)), h = groundHit(e.clientX, e.clientY, orbit.target.y);
-    if (h) { const k = 1 - nd / orbit.dist; orbit.target.x += (h.x - orbit.target.x) * k; orbit.target.z += (h.z - orbit.target.z) * k; }
+    // zoom around the point under the cursor, but not near the horizon: there the flat-ground hit is far
+    // away (and behind any hill), so one step would throw the view kilometres
+    if (h && Math.hypot(h.x - orbit.target.x, h.z - orbit.target.z) < 2 * orbit.dist) { const k = 1 - nd / orbit.dist; orbit.target.x += (h.x - orbit.target.x) * k; orbit.target.z += (h.z - orbit.target.z) * k; }
     orbit.dist = nd;
   } else if (camMode === 'follow') follow.dist = Math.max(3, Math.min(800, follow.dist * f));
 }, { passive: false });

@@ -49,6 +49,7 @@
   .toggle input:checked + .sw::after { transform: translateX(12px); }
   .toggle input:focus-visible + .sw { outline: 2px solid #c9ccd2; outline-offset: 2px; }
   .toggle input:disabled ~ * { opacity: .45; }
+  .toggle:has(input:disabled) { cursor: default; }
   .toggle .tl { font-weight: 600; }
   .badge { font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--bad);
     background: #fdf0e8; border-radius: 4px; padding: 1px 5px; margin-left: 6px; vertical-align: 1px; }
@@ -137,7 +138,7 @@ const ROLE_LABEL = { events: "Events", network: "Network", schedule: "Transit sc
 let current = null;      // last /api/check result, only while it matches the folder field
 let files = {};          // role -> chosen path (or null)
 let sample = 0.1;
-let kind = "map";        // "map": agents as dots on a map; "world": a 3D world to fly through, with vehicles
+let kind = "map";        // "map": agents as dots on a map; "world": a 3D world to explore, with vehicles
 const KIND_HINT = {
   map: "Off: agents as dots over a tilted map with terrain and buildings.",
   world: "On: a 3D world to explore: vehicles, walkers, buildings and trees. Click a vehicle to follow it.",
