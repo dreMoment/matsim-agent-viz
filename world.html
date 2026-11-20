@@ -2,6 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- The page can reach only these hosts: map tiles, fonts and the map and 3D libraries. The run data is inside this file. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self';
+  script-src 'self' 'unsafe-inline' blob: https://unpkg.com https://cdn.jsdelivr.net;
+  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com;
+  font-src https://fonts.gstatic.com;
+  img-src 'self' data: blob: https://tiles.openfreemap.org https://tiles.mapterhorn.com;
+  connect-src 'self' https://tiles.openfreemap.org https://tiles.mapterhorn.com https://unpkg.com https://cdn.jsdelivr.net;
+  worker-src 'self' blob: https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__TITLE__ · MATSim world</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">

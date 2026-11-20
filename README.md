@@ -6,35 +6,39 @@ A minimal 3D animation of the last iteration of a MATSim run. Each agent on a le
 
 *The synthetic test run from `examples/make_fake_run.py --osm`, not real data.*
 
-With `--world` it builds a second kind of page instead: a 3D world you can explore, with cars, buses, trams, trains, bikes and walkers on streets lined with buildings and trees. See [The 3D world](#the-3d-world---world).
+It can also build a second kind of page: a 3D world you can explore, with cars, buses, trams, trains, bikes and walkers on streets lined with buildings and trees. See [The 3D world](#the-3d-world).
 
-One Python script reads the run's final outputs and writes a single HTML page. The map, terrain and building tiles come from OpenFreeMap and Mapterhorn (no API key), so the page needs internet. The simulation data stays inside the file.
+**Open it at https://dremoment.github.io/matsim-agent-viz/**, choose the run's output folder, and press **Build and open**. Nothing to install.
+
+## Your run stays on your computer
+
+The website reads the run in your browser tab. The files are never uploaded: the site is a set of static files on GitHub Pages, with no server that could receive them.
+
+- The build runs in the tab, in JavaScript (`js/engine.js`). It reads only the events, network, transit schedule, config and bike-sharing station files. It never reads the population, facilities or households files.
+- What leaves your computer: map tiles (OpenFreeMap, Mapterhorn), fonts and the map and 3D libraries. For trains and walkers, OpenStreetMap tracks and footpaths are downloaded from the Overpass API by tile, and only the tile bounds go out. A coordinate-system code the tool doesn't know is looked up on epsg.io; only the code goes out.
+- Each page has a Content-Security-Policy that lists these hosts and blocks all others. So even a bug can't send your data anywhere else. You can check it in your browser's developer tools (Network tab), or read the policy at the top of `index.html`.
 
 ## Usage
 
-Needs [uv](https://docs.astral.sh/uv/). It installs the dependencies, `pyproj` and `scipy`.
+1. Open the site in a recent Chrome, Edge, Firefox or Safari.
+2. Drop the run's output folder on the page, or click **Choose folder…**. The page lists the input files it found, and you can swap any of them with **Change…**. Firefox and Safari may ask whether to "upload" the files. They are only read in the tab.
+3. Pick the share of agents and, if you like, the **3D world**, then **Build and open**. The page opens in the same tab. **← Back** returns to the run, and **Save page** downloads the page as one HTML file you can share. To watch it again, open the site and use **Open a saved page…** (or drop the file on it). A saved map page also opens straight from disk in Chrome, but the 3D world doesn't: browsers don't run its workers from a local file. Some viewers (Quick Look, editor previews) block WebGL.
+
+The **Trains and walkers on OpenStreetMap paths** switch turns off the track and footpath downloads. Trains and trams then use the run's own links, and walkers move in straight lines.
+
+Reading a full Zurich 10% run (49 M events) takes about 40 s in Chrome. With a 10% sample the page is about 34 MB. The browser remembers only the sample and the switches, not the folder.
+
+### From the command line
+
+For scripts, or to build without a browser, `tools/build.mjs` runs the same engine in Node 22 or newer:
 
 ```sh
-uv run matsim_agent_viz.py
+node tools/build.mjs path/to/simulation_output              # writes agents_3d.html into the run folder
+node tools/build.mjs path/to/simulation_output --world      # the 3D world, agents_world.html
 ```
-
-This opens a launcher in your browser. Click **Choose…** to pick the run's output folder (macOS only; on Linux and Windows paste the path instead). The launcher shows which input files it found, and you can swap any of them. Pick the share of agents, then **Build and open**. When the page is ready it opens in the same tab. **Open last page** shows a page you built before, with no rebuild. The launcher remembers your last folder, file swaps, sample, title and coordinate system in `~/.config/matsim-agent-viz/launcher.json` (paths and settings only, no run data).
-
-From the command line:
-
-```sh
-# build the page and open it
-uv run matsim_agent_viz.py path/to/simulation_output
-
-# open the existing page again, no rebuild
-uv run matsim_agent_viz.py path/to/simulation_output --view
-```
-
-The page is written to `agents_3d.html` in the run folder (change this with `--out`). Everything is served on `127.0.0.1` only (port 8765 if it is free). Opening the HTML file directly fails in some viewers (Quick Look, editor previews) because they block WebGL. Stop the server with Ctrl-C or the launcher's **Quit**.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `run_dir` | none: opens the launcher | MATSim output folder |
 | `--world` | | build the 3D world you can explore instead of the map |
 | `--out` | `<run-dir>/agents_3d.html` (`agents_world.html` with `--world`) | HTML file to write |
 | `--sample` | `0.1` | share of agents to show (stable hash of the person id) |
@@ -44,10 +48,12 @@ The page is written to `agents_3d.html` in the run folder (change this with `--o
 | `--no-rail` | | trains and trams use the run's own links, no track download |
 | `--no-walk` | | walkers move in straight lines, no footpath download |
 | `--no-passenger` | | car passengers move in straight lines |
-| `--view` | | open the existing page, no rebuild |
-| `--no-open` | | only write the page |
 
-A full Zurich 10% run (49 M events) takes about 2.5 minutes. With `--sample 0.1` the page is about 34 MB.
+It caches OpenStreetMap tiles in `~/.cache/matsim-agent-viz`.
+
+### Running the site yourself
+
+The site is static files, so any web server works, e.g. `python3 -m http.server 8000 --bind 127.0.0.1`, then open http://127.0.0.1:8000. It doesn't work from `file://`, because browsers don't run workers there.
 
 ## What it reads
 
@@ -57,24 +63,24 @@ Plain or `.gz`, with or without a run-id prefix (`myrun.output_events.xml.gz`):
 - `output_network.xml.gz` (required): link coordinates, and the coordinate system if the config doesn't set one
 - `output_transitSchedule.xml.gz` (optional): stop coordinates, and which routes are trains or trams. Without it, PT riders follow the network links only.
 - `output_config.xml` (optional): coordinate system (`global.coordinateSystem`) and last iteration number.
-- sharing service file (optional): stations and bikes of a station-based bike-sharing service (shared_mobility contrib), e.g. `publibike_service.xml`. The script follows `serviceInputFile` in the config's `sharing` module and looks for the file in the run folder, next to the config and in the folder above. Otherwise pass it with `--sharing`. With several station-based services, the first one found is shown; pass `--sharing` to pick another.
+- sharing service file (optional): stations and bikes of a station-based bike-sharing service (shared_mobility contrib), e.g. `publibike_service.xml`. The tool follows `serviceInputFile` in the config's `sharing` module and looks for the file in the run folder and its subfolders. Otherwise choose it with **Change…** (`--sharing` on the command line). With several station-based services, the first one found is shown; choose the file to pick another.
 
 It never reads the population, facilities or households files.
 
-**Coordinate system.** The script takes it from `--crs`, else from `output_config.xml` (`global.coordinateSystem`), else from the network file's `coordinateReferenceSystem` attribute. EPSG codes work, and so do MATSim's own names such as `GK4`, `DHDN_GK4`, `CH1903_LV03_Plus` and `WGS84_UTM33N`. If none of these sets one, it can only guess the Swiss grids (LV95, LV03). For any other region, pass `--crs`, e.g. `--crs EPSG:25832`.
+**Coordinate system.** The tool takes it from the **Coordinate system** field (`--crs`), else from `output_config.xml` (`global.coordinateSystem`), else from the network file's `coordinateReferenceSystem` attribute. EPSG codes work, and so do MATSim's own names such as `GK4`, `DHDN_GK4`, `CH1903_LV03_Plus` and `WGS84_UTM33N`. If none of these sets one, it can only guess the Swiss grids (LV95, LV03). For any other region, enter one, e.g. `EPSG:25832`. Common European grids are built in; other EPSG codes are looked up on epsg.io, and a proj string works too. Grids that need a shift file (German DHDN, British OSGB36) use a close approximation, accurate to a few metres.
 
 **Events format.** Only the standard XML events file (plain or `.gz`) is supported.
 
 - **Car and PT**: dots follow the vehicle's link entries and stop events. This includes the SBB deterministic transit engine.
-- **Trains and trams**: their network links are often straight lines from stop to stop (pt2matsim builds rail that way). So between two stops, dots follow the real railway tracks from OpenStreetMap instead. The script finds the shortest path along the tracks that never turns back at a switch, with trains kept on rail tracks and trams on tram tracks. Routes count as trains when their `transportMode` contains rail, train, subway, metro or S-Bahn, and as trams when it contains tram. The vehicle's route comes from the `TransitDriverStarts` events. If no suitable track is within 300 m of both stops, the dot goes straight, as before.
-  - The tracks are downloaded from the Overpass API by 1° tile around the stops that riders used. A first build for all of Switzerland takes a few minutes. After that, the tiles come from `~/.cache/matsim-agent-viz/rail` (delete the folder to refresh them). Only the tile bounds go out, no run data.
-  - `--no-rail` turns this off and skips the download.
+- **Trains and trams**: their network links are often straight lines from stop to stop (pt2matsim builds rail that way). So between two stops, dots follow the real railway tracks from OpenStreetMap instead. The tool finds the shortest path along the tracks that never turns back at a switch, with trains kept on rail tracks and trams on tram tracks. Routes count as trains when their `transportMode` contains rail, train, subway, metro or S-Bahn, and as trams when it contains tram. The vehicle's route comes from the `TransitDriverStarts` events. If no suitable track is within 300 m of both stops, the dot goes straight, as before.
+  - The tracks are downloaded from the Overpass API by 1° tile around the stops that riders used. A first build for all of Switzerland takes a few minutes. After that, the tiles come from the browser's cache (clear the site's data to refresh them; `~/.cache/matsim-agent-viz/rail` for the command line). Only the tile bounds go out, no run data.
+  - The **Trains and walkers on OpenStreetMap paths** switch (`--no-rail`) turns this off and skips the download.
 - **Other network modes** (DRT, network-routed sharing, freight, …): any agent that enters a vehicle follows that vehicle's link events the same way. Not tested beyond car and PT.
 - **Walks** (any mode with "walk" in its name, e.g. walk, access walks): MATSim teleports them, so it only knows where and when a walk starts and ends. Walkers follow the shortest path on OpenStreetMap footways, pedestrian zones, steps, paths and streets, and keep MATSim's start and end times.
-  - The ways are downloaded from the Overpass API in tiles of 0.05° (about 5 × 4 km), only where sampled agents walk. The 40 tiles with the most walks get paths, and walks elsewhere stay straight. So do walks under 30 m or over 5 km, and walks whose start or end is more than 250 m from a path. Tiles are cached in `~/.cache/matsim-agent-viz/walk`. A tile can take a minute or more to download when Overpass is busy, so the first build of a large run can take a while. Only the tile bounds go out, no run data.
+  - The ways are downloaded from the Overpass API in tiles of 0.05° (about 5 × 4 km), only where sampled agents walk. The 40 tiles with the most walks get paths, and walks elsewhere stay straight. So do walks under 30 m or over 5 km, and walks whose start or end is more than 250 m from a path. Tiles are cached like the rail tracks. A tile can take a minute or more to download when Overpass is busy, so the first build of a large run can take a while. Only the tile bounds go out, no run data.
   - Each walk adds its own path to the page, about 300 bytes per walk.
-  - `--no-walk` turns this off and skips the download.
-- **Car passengers** (modes with "passenger" in the name, or `ride`): MATSim teleports them too. They follow the fastest path on the run's own car links at free-flow speed, keeping MATSim's start and end times, and get trip lines like cars. They get on and off at the nearest node of a road with a speed limit of 60 km/h or less (within 1 km), so never on a motorway. No download. `--no-passenger` turns this off.
+  - The same switch (`--no-walk`) turns this off and skips the download.
+- **Car passengers** (modes with "passenger" in the name, or `ride`): MATSim teleports them too. They follow the fastest path on the run's own car links at free-flow speed, keeping MATSim's start and end times, and get trip lines like cars. They get on and off at the nearest node of a road with a speed limit of 60 km/h or less (within 1 km), so never on a motorway. No download. `--no-passenger` turns this off on the command line.
 - **Other teleported modes** (bike, …): dots move in a straight line at constant speed, because MATSim doesn't simulate the path.
 
 Any mode name works. Common ones (car, pt, bike, walk, and a few from the Swiss eqasim scenarios such as `publibike` and `outside`) have fixed colours. Other modes get colours from a fallback palette, and their names are tidied up for the legend (`e_scooter` → "E scooter"). To give a mode its own colour, add it to `MODE_STYLE` in `page.html`.
@@ -95,7 +101,7 @@ Any mode name works. Common ones (car, pt, bike, walk, and a few from the Swiss 
   - `?` help
 - **Camera**: drag to pan; right-drag or Ctrl-drag to tilt and rotate.
 
-## The 3D world (`--world`)
+## The 3D world
 
 ![The synthetic run over central Zurich in the 3D world](docs/world.jpg)
 
@@ -103,11 +109,7 @@ Any mode name works. Common ones (car, pt, bike, walk, and a few from the Swiss 
 
 *The synthetic test run from `examples/make_fake_run.py --osm`, not real data.*
 
-```sh
-uv run matsim_agent_viz.py path/to/simulation_output --world
-```
-
-In the launcher, turn on the **3D world (Experimental)** toggle. The same run data goes into the page, plus which transit vehicle each sampled rider was on. The page is written to `agents_world.html` and does not replace the map page.
+Turn on the **3D world (Experimental)** switch (`--world` on the command line). The same run data goes into the page, plus which transit vehicle each sampled rider was on.
 
 - **World**: built in your browser from OpenStreetMap vector tiles (OpenFreeMap) and terrain (Mapterhorn), so it works for any region with no extra download step. The style is flat-shaded low poly: faceted terrain and water, buildings with windows and pitched or flat roofs, roads with kerbs and lane markings, rails with sleepers, bridges with railings, footpaths, and trees in forests, parks and gardens. Further out there are buildings only, and to the horizon there is terrain painted with land cover. Tiles load as you move and the browser caches them. Only tile addresses go out, no run data.
 - **Agents**: each mode gets a vehicle. Cars, car passengers and anything else on the road are cars, and trucks are trucks. Bikes and scooters are cyclists, and walks are walkers. A transit vehicle is drawn once for all its sampled riders: a bus, a 3-car tram, a 4-car train or a boat, depending on the route's `transportMode`. Riders stand at the stop until their vehicle comes. Cars keep to the right of the road. Colours are everyday colours, or **By mode**. Coloured dots mark agents too far away to see.
@@ -125,17 +127,24 @@ In the launcher, turn on the **3D world (Experimental)** toggle. The same run da
 
 ```sh
 uv run examples/make_fake_run.py /tmp/fake_run
-uv run matsim_agent_viz.py /tmp/fake_run --sample 1
+node tools/build.mjs /tmp/fake_run --sample 1
 ```
+
+Or drop `/tmp/fake_run` on the site.
 
 With `--osm`, the roads are central Zurich's real streets from OpenStreetMap instead of the grid, so cars and buses drive on real roads. The streets are downloaded once and cached in `~/.cache/matsim-agent-viz/demo_roads.json`. The GIF above was made this way, with `--sample 0.25`, at speed 1 and in presentation mode (`H`).
 
 ## Files
 
-- `matsim_agent_viz.py`: reads the run and writes the page
-- `launcher.html`: the launcher page (folder and file picker, build progress)
-- `page.html`: the page template. `__DATA__`, `__TITLE__`, `__EYEBROW__` and `__NOTE__` are filled in by the script.
+- `index.html`: the website's start page (folder and file picker, build progress, the page viewer)
+- `js/engine.js`: reads the run and builds the page data, in the browser and in Node
+- `js/worker.js`: runs the engine in the background in the browser, and caches OpenStreetMap tiles
+- `page.html`: the map template. `__DATA__`, `__TITLE__`, `__EYEBROW__` and `__NOTE__` are filled in by the engine.
 - `world.html`: the 3D world template (three.js, no build step), filled in the same way. A worker inside it builds each map tile.
+- `tools/build.mjs`: the command line build
+- `vendor/proj4.mjs`: [proj4js](https://github.com/proj4js/proj4js) 2.22.0 (MIT) as one ES module, for coordinate systems
+
+No build step: the files are served as they are. GitHub Pages publishes the `main` branch.
 
 ## License
 
