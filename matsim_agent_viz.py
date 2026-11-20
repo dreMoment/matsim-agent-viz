@@ -2,7 +2,8 @@
 # requires-python = ">=3.11"
 # dependencies = ["pyproj", "scipy"]
 # ///
-"""3D map animation of the last iteration: agents as dots, by mode.
+"""3D animation of the last iteration: agents as dots on a map, or as vehicles in a
+3D world you can explore (--world).
 
 Reads the final outputs of a MATSim run and writes one HTML page. Open it in
 a browser to watch a sample of agents move over a 3D map of the area, with
@@ -51,6 +52,7 @@ Usage:
 Pages are served on 127.0.0.1 only. Opening the HTML file directly may not
 work in some viewers (T3, Quick Look), because they block WebGL.
 Options:
+  --world         a 3D world to explore (agents_world.html) instead of the map
   --sample 0.1    share of agents to show (0-1)
   --title TEXT    scenario name on the page
   --crs EPSG:xxxx coordinate system, if output_config does not set one
@@ -341,18 +343,21 @@ def read_sharing_stations(path: Path, run_dir: Path, config: Path | None, link_m
 
 
 def read_schedule(path: Path):
-    """Stop coordinates, and the track kind ('rail', 'tram') of each (line, route) that runs on tracks."""
-    stops, kinds = {}, {}
+    """Stop coordinates, the track kind ('rail', 'tram') of each (line, route) that runs on tracks, and the
+    vehicle kind ('bus', 'tram', 'rail', 'ferry') of every (line, route), which the 3D world draws."""
+    stops, kinds, vkinds = {}, {}, {}
     for el in iter_elements(path, {"stopFacility", "transitLine"}, "Reading transit stops"):
         if el.tag == "stopFacility":
             stops[el.get("id")] = (float(el.get("x")), float(el.get("y")))
         else:
             for route in el.iter("transitRoute"):
-                kind = track_kind(route.findtext("transportMode"))
+                mode = route.findtext("transportMode")
+                kind = track_kind(mode)
                 if kind:
                     kinds[(el.get("id"), route.get("id"))] = kind
+                vkinds[(el.get("id"), route.get("id"))] = vehicle_kind(mode)
             el.clear()  # departures make up most of a schedule
-    return stops, kinds
+    return stops, kinds, vkinds
 
 
 # ---------------------------------------------------------------- rail tracks
@@ -378,6 +383,13 @@ def track_kind(transport_mode: str | None) -> str | None:
     if re.search(r"rail|train|subway|metro|s-?bahn", m):
         return "rail"
     return None
+
+
+def vehicle_kind(transport_mode: str | None) -> str:
+    """What a transit vehicle looks like in the 3D world: 'rail', 'tram', 'ferry' or 'bus' (anything else)."""
+    if re.search(r"ferry|ship|boat", (transport_mode or "").lower()):
+        return "ferry"
+    return track_kind(transport_mode) or "bus"
 
 
 def osm_tile(path: Path, query: str, what: str) -> dict | None:
@@ -833,13 +845,18 @@ SHARING_EVENTS = {"sharing vehicle pickup": 0, "sharing vehicle dropoff": 1,
 SHARING_ACTS = {"sharing pickup interaction", "sharing dropoff interaction"}
 
 
-def build_legs(events: Path, sample: float, link_from, link_mid, stops, sharing=None, route_kinds=None):
+def build_legs(events: Path, sample: float, link_from, link_mid, stops, sharing=None, route_kinds=None,
+               vehicle_kinds=None):
     """Legs of the sampled agents. With `sharing` (stations), also collects every station event
     of that service into sharing["ev"], for all agents: the page shows only station totals.
 
     With `route_kinds` ((line, route) -> 'rail' / 'tram'), each ride of a train or tram between two
     stops is noted in leg["hops"] as (index of the departure point, index of the arrival point,
-    (from stop, to stop, kind)), so it can be drawn along the tracks later."""
+    (from stop, to stop, kind)), so it can be drawn along the tracks later.
+
+    With `vehicle_kinds` ((line, route) -> 'bus' / 'tram' / 'rail' / 'ferry'), a leg that rides a transit
+    vehicle gets leg["veh"] = (vehicle id, kind) and leg["board"] = boarding time, so the 3D world draws one
+    vehicle for all its sampled riders, and the rider standing at the stop until it comes."""
     threshold = int(sample * 10000)
 
     def sampled(person):
@@ -858,6 +875,8 @@ def build_legs(events: Path, sample: float, link_from, link_mid, stops, sharing=
         sharing["ev"] = []
     route_kinds = route_kinds or {}
     on_tracks = {}     # vehicle -> 'rail' / 'tram', for transit vehicles of routes that run on tracks
+    vehicle_kinds = vehicle_kinds or {}
+    transit = {}       # transit vehicle -> 'bus' / 'tram' / 'rail' / 'ferry', from TransitDriverStarts
     departed = {}      # such vehicle -> (stop it last left, time)
 
     def add(person, t, xy, routed=False, keep=False):
@@ -909,7 +928,11 @@ def build_legs(events: Path, sample: float, link_from, link_mid, stops, sharing=
                     open_leg[person] = {"mode": el.get("legMode") or "unknown", "pts": [(t, *start)]}
         elif typ == "PersonEntersVehicle":
             if sampled(person) and person in open_leg:
-                riders.setdefault(el.get("vehicle"), set()).add(person)
+                veh = el.get("vehicle")
+                riders.setdefault(veh, set()).add(person)
+                if veh in transit and "veh" not in open_leg[person]:
+                    open_leg[person]["veh"] = (veh, transit[veh])
+                    open_leg[person]["board"] = t
                 last = open_leg[person]["pts"][-1]
                 add(person, t, (last[1], last[2]))  # waited here until boarding
         elif typ == "PersonLeavesVehicle":
@@ -943,7 +966,9 @@ def build_legs(events: Path, sample: float, link_from, link_mid, stops, sharing=
             if kind and typ == "VehicleDepartsAtFacility":
                 departed[veh] = (stop, t)
         elif typ == "TransitDriverStarts":
-            kind = route_kinds.get((el.get("transitLineId"), el.get("transitRouteId")))
+            line_route = (el.get("transitLineId"), el.get("transitRouteId"))
+            transit[el.get("vehicleId")] = vehicle_kinds.get(line_route, "bus")
+            kind = route_kinds.get(line_route)
             if kind:
                 on_tracks[el.get("vehicleId")] = kind
                 departed.pop(el.get("vehicleId"), None)
@@ -1013,7 +1038,12 @@ def deltas(v):
     return v[:1] + [b - a for a, b in zip(v, v[1:])]
 
 
-def to_payload(legs, crs: CRS, sharing=None, tracks=None):
+VEHICLE_KINDS = ["bus", "tram", "rail", "ferry"]
+
+
+def to_payload(legs, crs: CRS, sharing=None, tracks=None, vehicles=False):
+    """The page's data. With `vehicles` (the 3D world), also "pt": [[leg, vehicle, kind, boarded after s], ...]
+    for legs on a transit vehicle. Vehicles are numbered here; their ids stay out of the page."""
     tf = Transformer.from_crs(crs, 4326, always_xy=True)
     modes = sorted({leg["mode"] for leg in legs})
     mode_idx = {m: i for i, m in enumerate(modes)}
@@ -1030,11 +1060,20 @@ def to_payload(legs, crs: CRS, sharing=None, tracks=None):
         routed = 1 if leg.get("routed") else 0  # moved through network links or transit stops, not teleported
         out.append([mode_idx[leg["mode"]], [round(v) for v in ts], lon_i, lat_i, routed] + ([refs] if refs else []))
         starts_lon.append(lons[0]); starts_lat.append(lats[0])
-    out.sort(key=lambda r: r[1][0])
+    order = sorted(range(len(out)), key=lambda i: out[i][1][0])
+    out = [out[i] for i in order]
     # initial view: close in on the median leg start, where 3D buildings show
     starts_lon.sort(); starts_lat.sort()
     centre = [starts_lon[len(starts_lon) // 2], starts_lat[len(starts_lat) // 2]]
     payload = {"modes": modes, "legs": out, "centre": centre}
+    if vehicles:
+        veh_idx, pt = {}, []
+        for k, i in enumerate(order):
+            if "veh" in legs[i]:
+                veh, kind = legs[i]["veh"]
+                pt.append([k, veh_idx.setdefault(veh, len(veh_idx)), VEHICLE_KINDS.index(kind),
+                           max(0, round(legs[i]["board"] - legs[i]["pts"][0][0]))])
+        payload["vkinds"], payload["pt"] = VEHICLE_KINDS, pt
     if tracks:  # train, tram and walk paths, each stored once: [[lon, Δlon, ...], [lat, Δlat, ...]]
         payload["tracks"] = []
         for line in tracks.values():
@@ -1052,8 +1091,10 @@ def to_payload(legs, crs: CRS, sharing=None, tracks=None):
 
 
 PAGE = Path(__file__).with_name("page.html")
+WORLD_PAGE = Path(__file__).with_name("world.html")  # the 3D world you can explore (--world)
 LAUNCHER = Path(__file__).with_name("launcher.html")
 DEFAULT_OUT = "agents_3d.html"
+DEFAULT_WORLD_OUT = "agents_world.html"
 LAUNCHER_PORT = 8765
 # The launcher's last choices (folder, swapped files, sample, title, CRS). Paths and settings only, no run data.
 SETTINGS = Path.home() / ".config" / "matsim-agent-viz" / "launcher.json"
@@ -1061,8 +1102,9 @@ SETTINGS = Path.home() / ".config" / "matsim-agent-viz" / "launcher.json"
 
 def build(run_dir: Path, files: dict[str, Path | None], out: Path, sample: float = 0.1,
           title: str | None = None, crs: str | None = None, rail: bool = True, walk: bool = True,
-          passengers: bool = True) -> Path:
+          passengers: bool = True, world: bool = False) -> Path:
     """Read the run and write the page. `files` maps INPUTS roles to paths (None = not there).
+    With `world`, the page is the 3D world (world.html) instead of the map (page.html).
     With `rail`, trains and trams follow OpenStreetMap tracks between stops; with `walk`, walkers follow
     OpenStreetMap footpaths (both downloaded once, then cached); with `passengers`, car passengers follow
     the run's car links."""
@@ -1096,17 +1138,17 @@ def build(run_dir: Path, files: dict[str, Path | None], out: Path, sample: float
         crs_obj = guess_swiss_crs(link_mid.values())
     if schedule is not None:
         say("reading transit stops ...")
-        stops, route_kinds = read_schedule(schedule)
+        stops, route_kinds, vehicle_kinds = read_schedule(schedule)
     else:
         say("no transit schedule: pt riders follow the network links only")
-        stops, route_kinds = {}, {}
+        stops, route_kinds, vehicle_kinds = {}, {}, {}
     sharing = None
     if sharing_file is not None:
         say("reading sharing stations ...")
         sharing = read_sharing_stations(sharing_file, run_dir, config, link_mid)
     say("reading events (this can take a few minutes) ...")
     legs, n_events = build_legs(events, sample, link_from, link_mid, stops, sharing,
-                                route_kinds if rail else None)
+                                route_kinds if rail else None, vehicle_kinds if world else None)
     if not legs:
         fail("no legs found for the sampled agents. Try a larger sample.")
     hops = {h[2] for leg in legs for h in leg.get("hops", ())}
@@ -1132,12 +1174,12 @@ def build(run_dir: Path, files: dict[str, Path | None], out: Path, sample: float
     del roads
 
     progress("Writing the page")
-    payload = to_payload(legs, crs_obj, sharing, tracks)
+    payload = to_payload(legs, crs_obj, sharing, tracks, vehicles=world)
     title = title or scenario_name(run_dir)
     last_it = read_param(config, "lastIteration")
     eyebrow = f"{title} · " + (f"iteration {last_it}" if last_it else "last iteration")
     note = "all agents" if sample >= 1 else f"{sample:.0%} sample of agents"
-    html = (PAGE.read_text(encoding="utf-8").replace("__DATA__", json.dumps(payload, separators=(",", ":")))
+    html = ((WORLD_PAGE if world else PAGE).read_text(encoding="utf-8").replace("__DATA__", json.dumps(payload, separators=(",", ":")))
             .replace("__NOTE__", escape(note)).replace("__EYEBROW__", escape(eyebrow))
             .replace("__TITLE__", escape(title)))
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -1161,7 +1203,10 @@ def main():
     ap.add_argument("run_dir", nargs="?", type=Path,
                     help="MATSim output folder. Leave it out to open the launcher in your browser.")
     ap.add_argument("--run-dir", dest="run_dir_opt", type=Path, help=argparse.SUPPRESS)
-    ap.add_argument("--out", type=Path, help=f"HTML file to write (default: {DEFAULT_OUT} in the run folder)")
+    ap.add_argument("--world", action="store_true",
+                    help="build the 3D world you can explore, with vehicles and buildings, instead of the map")
+    ap.add_argument("--out", type=Path, help=f"HTML file to write (default: {DEFAULT_OUT} in the run folder, "
+                                             f"{DEFAULT_WORLD_OUT} with --world)")
     ap.add_argument("--sample", type=float, default=0.1, help="share of agents to show, 0-1 (default 0.1)")
     ap.add_argument("--title", help="scenario name shown on the page (default: from the run folder, e.g. 'Zurich 10pct')")
     ap.add_argument("--crs", help="coordinate system of the run, e.g. EPSG:2056 (default: from output_config)")
@@ -1182,7 +1227,7 @@ def main():
     if run_dir is None:
         serve()
         return
-    out = args.out or run_dir / DEFAULT_OUT
+    out = args.out or run_dir / (DEFAULT_WORLD_OUT if args.world else DEFAULT_OUT)
     if args.view:
         if not out.is_file():
             fail(f"{out} not found. Build it first by running the script without --view.")
@@ -1195,7 +1240,7 @@ def main():
     if args.config and not args.sharing:  # the sharing file comes from whichever config is used
         files["sharing"] = sharing_for(run_dir, args.config)
     build(run_dir, files, out, args.sample, args.title, args.crs, rail=not args.no_rail, walk=not args.no_walk,
-          passengers=not args.no_passenger)
+          passengers=not args.no_passenger, world=args.world)
     if args.no_open:
         print("To watch it later without rebuilding, add --view.")
     else:
@@ -1234,15 +1279,17 @@ def check_dir(d: Path) -> dict:
     if not d.is_dir():
         return {"ok": False}
     files = find_inputs(d)
-    out = d / DEFAULT_OUT
+    out, world_out = d / DEFAULT_OUT, d / DEFAULT_WORLD_OUT
     return {
-        "ok": True, "dir": str(d), "title": scenario_name(d), "out": str(out),
+        "ok": True, "dir": str(d), "title": scenario_name(d), "out": str(out), "worldOut": str(world_out),
         "crs": config_crs(files["config"]),
         "files": {role: {"name": name, "required": req, "use": use,
                          "path": str(files[role]) if files[role] else None,
                          "size": files[role].stat().st_size if files[role] else None}
                   for role, (name, req, use) in INPUTS.items()},
         "existing": {"size": out.stat().st_size, "mtime": out.stat().st_mtime} if out.is_file() else None,
+        "existingWorld": ({"size": world_out.stat().st_size, "mtime": world_out.stat().st_mtime}
+                          if world_out.is_file() else None),
     }
 
 
@@ -1302,9 +1349,10 @@ def serve(page: Path | None = None):
             run_dir = Path(req["dir"]).expanduser()
             files = {role: Path(p).expanduser() if p else None for role, p in req.get("files", {}).items()}
             _progress = track(files)
-            out = run_dir / DEFAULT_OUT
+            world = bool(req.get("world"))
+            out = run_dir / (DEFAULT_WORLD_OUT if world else DEFAULT_OUT)
             state["page"] = build(run_dir, files, out, float(req.get("sample", 0.1)),
-                                  req.get("title") or None, req.get("crs") or None)
+                                  req.get("title") or None, req.get("crs") or None, world=world)
         except SystemExit as e:
             state["error"] = str(e.code).removeprefix("ERROR: ")
         except Exception as e:  # show it in the launcher instead of a dead thread

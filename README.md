@@ -6,6 +6,8 @@ A minimal 3D animation of the last iteration of a MATSim run. Each agent on a le
 
 *The synthetic test run from `examples/make_fake_run.py --osm`, not real data.*
 
+With `--world` it builds a second kind of page instead: a 3D world you can explore, with cars, buses, trams, trains, bikes and walkers on streets lined with buildings and trees. See [The 3D world](#the-3d-world---world).
+
 One Python script reads the run's final outputs and writes a single HTML page. The map, terrain and building tiles come from OpenFreeMap and Mapterhorn (no API key), so the page needs internet. The simulation data stays inside the file.
 
 ## Usage
@@ -33,7 +35,8 @@ The page is written to `agents_3d.html` in the run folder (change this with `--o
 | Option | Default | Meaning |
 |---|---|---|
 | `run_dir` | none: opens the launcher | MATSim output folder |
-| `--out` | `<run-dir>/agents_3d.html` | HTML file to write |
+| `--world` | | build the 3D world you can explore instead of the map |
+| `--out` | `<run-dir>/agents_3d.html` (`agents_world.html` with `--world`) | HTML file to write |
 | `--sample` | `0.1` | share of agents to show (stable hash of the person id) |
 | `--title` | from the folder name | scenario name on the page |
 | `--crs` | from `output_config.xml`, else the network | e.g. `EPSG:2056`, if the run doesn't set one (an LV95/LV03 guess is the fallback) |
@@ -92,6 +95,30 @@ Any mode name works. Common ones (car, pt, bike, walk, and a few from the Swiss 
   - `?` help
 - **Camera**: drag to pan; right-drag or Ctrl-drag to tilt and rotate.
 
+## The 3D world (`--world`)
+
+![The synthetic run over central Zurich in the 3D world](docs/world.jpg)
+
+![Riding along behind a car in the 3D world](docs/world-street.jpg)
+
+*The synthetic test run from `examples/make_fake_run.py --osm`, not real data.*
+
+```sh
+uv run matsim_agent_viz.py path/to/simulation_output --world
+```
+
+In the launcher, turn on the **3D world (Experimental)** toggle. The same run data goes into the page, plus which transit vehicle each sampled rider was on. The page is written to `agents_world.html` and does not replace the map page.
+
+- **World**: built in your browser from OpenStreetMap vector tiles (OpenFreeMap) and terrain (Mapterhorn), so it works for any region with no extra download step. The style is flat-shaded low poly: faceted terrain and water, buildings with windows and pitched or flat roofs, roads with kerbs and lane markings, rails with sleepers, bridges with railings, footpaths, and trees in forests, parks and gardens. Further out there are buildings only, and to the horizon there is terrain painted with land cover. Tiles load as you move and the browser caches them. Only tile addresses go out, no run data.
+- **Agents**: each mode gets a vehicle. Cars, car passengers and anything else on the road are cars, and trucks are trucks. Bikes and scooters are cyclists, and walks are walkers. A transit vehicle is drawn once for all its sampled riders: a bus, a 3-car tram, a 4-car train or a boat, depending on the route's `transportMode`. Riders stand at the stop until their vehicle comes. Cars keep to the right of the road. Colours are everyday colours, or **By mode**. Coloured dots mark agents too far away to see.
+- **Sun**: follows the simulation clock, from sunrise at 6:00 to sunset at 20:00, with a dusk sky and a night sky. **Midday** keeps it at noon.
+- **Camera**:
+  - like the map page: drag to move, right-drag (or Ctrl/Alt/Shift-drag) to turn and tilt, scroll to zoom towards the cursor
+  - **click** a vehicle or walker to ride along: chase camera, or `V` for the view on board. `R` rides along with someone near the centre of the view. A transit ride stays on the vehicle while sampled riders are aboard.
+  - `Esc` stops riding, `H` hides the panels, `M` turns the dots off, `N` switches the sun between the clock and midday
+- **Speed**: 1×, 10× (default), 1, 5 or 15 simulated minutes per second.
+- **Limits**: bridges get a flat deck at the height of their highest bank, with short ramps, and vehicles drive on it; real bridge heights (high viaducts) are not in the map data. Each map tile sets its own deck height, so a bridge that crosses a tile edge can have a step there. Tunnels are not drawn: trains and cars in a tunnel run on the ground above it. Up close, land cover (grass, gardens, banks) is a painted texture and looks a little soft next to the crisp roads, paths and water. Bike-sharing stations are shown on the map page only. It needs a recent browser with WebGL 2 and module workers (Chrome, Edge, Safari 17+, Firefox).
+
 ## Test data
 
 `examples/make_fake_run.py` writes a small synthetic run: a street grid around Zurich HB, a bus line, ten PubliBike stations with few bikes (so some pickups fail) and 3000 agents across nine modes. Use it to try the tool without real data:
@@ -108,6 +135,7 @@ With `--osm`, the roads are central Zurich's real streets from OpenStreetMap ins
 - `matsim_agent_viz.py`: reads the run and writes the page
 - `launcher.html`: the launcher page (folder and file picker, build progress)
 - `page.html`: the page template. `__DATA__`, `__TITLE__`, `__EYEBROW__` and `__NOTE__` are filled in by the script.
+- `world.html`: the 3D world template (three.js, no build step), filled in the same way. A worker inside it builds each map tile.
 
 ## License
 
