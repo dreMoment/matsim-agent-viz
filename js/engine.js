@@ -245,6 +245,7 @@ function parseTree(text) {
     const lt = text.indexOf("<", pos);
     if (lt < 0) break;
     if (text.startsWith("<!--", lt)) { pos = text.indexOf("-->", lt + 4) + 3; if (pos < 3) break; continue; }
+    if (text.startsWith("<?", lt)) { pos = text.indexOf("?>", lt + 2) + 2; if (pos < 2) break; continue; }  // may hold ">"
     const gt = text.indexOf(">", lt);
     if (gt < 0) break;
     pos = gt + 1;

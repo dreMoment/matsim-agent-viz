@@ -73,8 +73,9 @@ async function sharingNearby(dir, config, configPath) {
     if ((svc.serviceScheme ?? "").toLowerCase() === "freefloating") continue;
     const p = (svc.serviceInputFile ?? "").replace(/\\/g, "/");
     if (!p) continue;
-    const cands = path.isAbsolute(p) ? [p] : [path.resolve(dir, p), path.resolve(path.dirname(configPath ?? path.join(dir, "x")), p),
-      path.resolve(dir, "..", p), path.resolve(dir, path.basename(p)), path.resolve(dir, "..", path.basename(p))];
+    const cands = [  // in Python's order: by path, then by name next to the run
+      ...(path.isAbsolute(p) ? [p] : [path.resolve(dir, p), path.resolve(path.dirname(configPath ?? path.join(dir, "x")), p), path.resolve(dir, "..", p)]),
+      path.resolve(dir, path.basename(p)), path.resolve(dir, "..", path.basename(p))];
     for (const c of cands) if (await kindOf(c) === "file") return asFile(c);
   }
   return null;
@@ -107,8 +108,10 @@ try {
     if (!(await fs.stat(p).catch(() => null))?.isFile()) die(`ERROR: ${p} not found.`);
     files[role] = await asFile(p);
   }
-  if (opt.files.config && !opt.files.sharing) files.sharing = await sharingFor(entries, files.config);
-  if (!files.sharing && files.config && !opt.files.sharing) files.sharing = await sharingNearby(opt.dir, files.config, opt.files.config);
+  if (files.config && !opt.files.sharing) {  // the places the Python tool looked first, then anywhere in the run folder
+    files.sharing = await sharingNearby(opt.dir, files.config, opt.files.config)
+      ?? (opt.files.config ? await sharingFor(entries, files.config) : files.sharing);
+  }
   // Overpass refuses Node's default User-Agent. (Browsers send their own and must not set one: that needs a preflight.)
   const withAgent = (url, init = {}) => fetch(url, { ...init, headers: { ...init.headers, "User-Agent": "matsim-agent-viz" } });
   const env = {

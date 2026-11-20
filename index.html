@@ -405,6 +405,7 @@ function stopWorker() {
 
 $("build").onclick = () => {
   if (!folder || worker || checking) return;
+  openSeq++;  // a saved page still opening must not cover the build
   $("error").textContent = ""; $("log").textContent = "";
   const osm = $("osm").checked;
   const opt = { sample, world: kind === "world", rail: osm, walk: osm, passengers: true,
@@ -469,27 +470,28 @@ $("save").onclick = () => {
   a.href = page.url; a.download = page.filename;
   document.body.append(a); a.click(); a.remove();
 };
-$("openLast").onclick = () => page && openViewer();
+$("openLast").onclick = () => { openSeq++; if (page) openViewer(); };
 $("openSaved").onclick = () => { $("pageInput").value = ""; $("pageInput").click(); };
 $("pageInput").onchange = () => { const f = $("pageInput").files[0]; if (f) openSaved(f); };
 
 // A saved page may come from anyone, so its own HTML and scripts never run here. Only its data (parsed as JSON)
 // and its texts are taken, and the page is rendered again from this site's template.
-let openSeq = 0;  // a newer open wins over a slower one
-async function openSaved(file) {
+let openSeq = 0;  // a newer open (or a build) wins over a slower one
+async function openSaved(fileOrPromise) {
   const seq = ++openSeq;
   $("error").textContent = "";
+  let file = { name: "The file" };
   try {
+    file = await fileOrPromise;
     const text = await file.text();
     if (seq !== openSeq) return;
     // The data is one line of JSON right after the template's "<script>"; titles and texts come before it,
     // HTML-escaped, so they can't hold this marker.
-    const world = text.includes("<script>window.DATA = ");
-    const marker = world ? "<script>window.DATA = " : "<script>\nconst DATA = ";
-    const start = text.indexOf(marker);
-    if (start < 0) throw new Error();
-    const eol = text.indexOf("\n", start + marker.length);
-    const line = text.slice(start + marker.length, eol < 0 ? text.length : eol);
+    const m = /<script>(?:window\.DATA = |\r?\nconst DATA = )/.exec(text);  // LF or CRLF line endings
+    if (!m) throw new Error();
+    const world = m[0].includes("window.DATA"), start = m.index, from = start + m[0].length;
+    const eol = text.indexOf("\n", from);
+    const line = text.slice(from, eol < 0 ? text.length : eol);
     const payload = JSON.parse(line.replace(/;\s*(<\/script>)?\s*$/, ""));
     if (!Array.isArray(payload.modes) || !Array.isArray(payload.legs)) throw new Error();
     const doc = new DOMParser().parseFromString(text.slice(0, start), "text/html");  // inert: nothing in it runs
@@ -535,7 +537,7 @@ document.addEventListener("drop", async e => {
   const entry = [...e.dataTransfer.items].map(i => i.webkitGetAsEntry?.()).find(Boolean);
   if (!entry) return;
   if (entry.isDirectory) openFolder(() => fromDrop(entry));
-  else if (/\.html?$/i.test(entry.name)) openSaved(await entryFile(entry));
+  else if (/\.html?$/i.test(entry.name)) openSaved(entryFile(entry));  // claims its turn now, reads the file after
   else $("error").textContent = "Drop the run's output folder, not a single file.";
 });
 
