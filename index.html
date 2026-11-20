@@ -193,7 +193,7 @@
 </div>
 
 <script type="module">
-import { INPUTS, findInputs, sharingFor, readConfig, scenarioName, renderParts } from "./js/engine.js";
+import { INPUTS, findInputs, sharingFor, readConfig, scenarioName, renderParts, BuildError } from "./js/engine.js";
 
 const $ = id => document.getElementById(id);
 const ROLE_LABEL = { events: "Events", network: "Network", schedule: "Transit schedule", config: "Config", sharing: "Sharing stations" };
@@ -475,16 +475,20 @@ $("pageInput").onchange = () => { const f = $("pageInput").files[0]; if (f) open
 
 // A saved page may come from anyone, so its own HTML and scripts never run here. Only its data (parsed as JSON)
 // and its texts are taken, and the page is rendered again from this site's template.
+let openSeq = 0;  // a newer open wins over a slower one
 async function openSaved(file) {
+  const seq = ++openSeq;
   $("error").textContent = "";
   try {
     const text = await file.text();
-    // The data is one line of JSON that starts a line of the template; titles and texts come before it.
-    const world = text.includes("\n<script>window.DATA = ");
-    const marker = world ? "\n<script>window.DATA = " : "\nconst DATA = ";
+    if (seq !== openSeq) return;
+    // The data is one line of JSON right after the template's "<script>"; titles and texts come before it,
+    // HTML-escaped, so they can't hold this marker.
+    const world = text.includes("<script>window.DATA = ");
+    const marker = world ? "<script>window.DATA = " : "<script>\nconst DATA = ";
     const start = text.indexOf(marker);
     if (start < 0) throw new Error();
-    const eol = text.indexOf("\n", start + 1);
+    const eol = text.indexOf("\n", start + marker.length);
     const line = text.slice(start + marker.length, eol < 0 ? text.length : eol);
     const payload = JSON.parse(line.replace(/;\s*(<\/script>)?\s*$/, ""));
     if (!Array.isArray(payload.modes) || !Array.isArray(payload.legs)) throw new Error();
@@ -492,14 +496,22 @@ async function openSaved(file) {
     const title = doc.title.replace(/ · MATSim( world)?$/, "") || file.name.replace(/\.html?$/i, "");
     const eyebrow = doc.querySelector(".eyebrow")?.textContent.trim() || `${title} · last iteration`;
     const note = (/(\S[^·\n]*?) · click a mode to hide it/.exec(doc.body.textContent) ?? [])[1] ?? "";
-    const r = await fetch(world ? "world.html" : "page.html");
-    if (!r.ok) { $("error").textContent = `Could not load the page template (HTTP ${r.status}). Reload the site and try again.`; return; }
-    const template = await r.text();
+    let template;
+    try {
+      const r = await fetch(world ? "world.html" : "page.html");
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      template = await r.text();
+    } catch (e) {
+      if (seq === openSeq) $("error").textContent = `Could not load the page template (${e.message}). Check the connection and reload the site.`;
+      return;
+    }
+    if (seq !== openSeq) return;
     setPage(new Blob(renderParts(template, payload, { title, eyebrow, note }), { type: "text/html" }),
       title + (world ? " · 3D world" : ""), file.name);
     openViewer();
   } catch (e) {
-    $("error").textContent = e instanceof RangeError ? `${file.name} is too large to open in this browser.`
+    if (seq !== openSeq) return;
+    $("error").textContent = e instanceof RangeError || e instanceof BuildError ? `${file.name} is too large to open in this browser.`
       : `${file.name} is not a page saved by this tool.`;
   }
 }

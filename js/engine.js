@@ -210,15 +210,21 @@ async function scan(file, names, onTag, { withText = false, onBytes } = {}) {
           pos = gt + 1;
           continue;
         }
+        // Track the root element, to tell a complete file from a cut-off one. (No caller asks for the
+        // root's own tag in `names`, so it always comes through here.)
+        if (root === null && name[0] !== "?" && name[0] !== "!") {
+          const r = attrs(text, e);  // its real end, even with ">" or "/>" inside a value
+          if (!r) { pos = lt; break; }
+          root = name;
+          if (text.charCodeAt(r[1] - 1) === 47) closed = true;  // <root/>
+          pos = r[1] + 1;
+          continue;
+        }
         // Another tag: skip it. A ">" inside one of its values ends it early, but values hold no "<",
         // so the next "<" is still the next tag.
         const gt = text.indexOf(">", e);
         if (gt < 0) { pos = lt; break; }
-        // Track the root element, to tell a complete file from a cut-off one. (No caller asks for the
-        // root's own tag in `names`, so it always comes through here.)
-        if (root === null) {
-          if (name[0] !== "?" && name[0] !== "!") { root = name; if (text.charCodeAt(gt - 1) === 47) closed = true; }  // <root/>
-        } else if (name.length === root.length + 1 && name === "/" + root) closed = true;
+        if (root !== null && name.length === root.length + 1 && name === "/" + root) closed = true;
         pos = gt + 1;
       }
       rest = text.slice(pos);
@@ -244,7 +250,11 @@ function parseTree(text) {
     pos = gt + 1;
     const c = text[lt + 1];
     if (c === "?" || c === "!") continue;
-    if (c === "/") { if (stack.length > 1) stack.pop(); continue; }
+    if (c === "/") {  // an end tag must close the open element
+      if (stack.length < 2 || text.slice(lt + 2, gt).trim() !== stack[stack.length - 1].tag) { root.bad = true; break; }
+      stack.pop();
+      continue;
+    }
     let e = lt + 1;
     while (e < text.length && !/[\s/>]/.test(text[e])) e++;
     const r = attrs(text, e);
@@ -254,7 +264,7 @@ function parseTree(text) {
     stack[stack.length - 1].children.push(el);
     if (text[r[1] - 1] !== "/") stack.push(el);
   }
-  root.complete = stack.length === 1 && root.children.length > 0;  // every element closed
+  root.complete = !root.bad && stack.length === 1 && root.children.length > 0;  // every element closed, in order
   return root;
 }
 

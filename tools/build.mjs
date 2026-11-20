@@ -64,15 +64,17 @@ async function listFolder(dir) {
 }
 
 /** The station file the config names, looked up outside the run folder too: its path is relative to the original
- * config, which usually sits in the folder above the output. Like the Python tool did. */
-async function sharingNearby(dir, config) {
+ * config, which usually sits in the folder above the output. Same places as the Python tool: the run folder, the
+ * config's folder and the folder above, by path and then by name. */
+async function sharingNearby(dir, config, configPath) {
   let cfg;
   try { cfg = await readConfig(config); } catch { return null; }
   for (const svc of cfg.services) {
     if ((svc.serviceScheme ?? "").toLowerCase() === "freefloating") continue;
     const p = (svc.serviceInputFile ?? "").replace(/\\/g, "/");
     if (!p) continue;
-    const cands = path.isAbsolute(p) ? [p] : [path.resolve(dir, "..", p), path.resolve(dir, "..", path.basename(p))];
+    const cands = path.isAbsolute(p) ? [p] : [path.resolve(dir, p), path.resolve(path.dirname(configPath ?? path.join(dir, "x")), p),
+      path.resolve(dir, "..", p), path.resolve(dir, path.basename(p)), path.resolve(dir, "..", path.basename(p))];
     for (const c of cands) if (await kindOf(c) === "file") return asFile(c);
   }
   return null;
@@ -106,7 +108,7 @@ try {
     files[role] = await asFile(p);
   }
   if (opt.files.config && !opt.files.sharing) files.sharing = await sharingFor(entries, files.config);
-  if (!files.sharing && files.config && !opt.files.sharing) files.sharing = await sharingNearby(opt.dir, files.config);
+  if (!files.sharing && files.config && !opt.files.sharing) files.sharing = await sharingNearby(opt.dir, files.config, opt.files.config);
   // Overpass refuses Node's default User-Agent. (Browsers send their own and must not set one: that needs a preflight.)
   const withAgent = (url, init = {}) => fetch(url, { ...init, headers: { ...init.headers, "User-Agent": "matsim-agent-viz" } });
   const env = {
