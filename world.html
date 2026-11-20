@@ -1428,7 +1428,7 @@ function startFollow(li) {
   const l = legs[li]; if (!l) return;
   if (camMode !== 'follow') setMode('follow');
   follow.li = li; follow.yaw = NaN; follow.yawOff = 0; follow.ok = false; follow.kmh = 0; follow.lastT = t; follow.lastS = sAt(l, t);
-  follow.kind = kindOf(l); follow.dist = MODELS[follow.kind].chase;
+  follow.kind = kindOf(l); follow.dist = MODELS[follow.kind].chase; follow.sm.wait = t;
   $('follow').hidden = false;
   updateFollowCard(true);
 }
@@ -1501,9 +1501,8 @@ function updateCamera(dt) {
       // faceted ground makes small height steps, which shake the view when the camera is fixed to the agent.
       const yaw = follow.yaw + follow.yawOff, cp = Math.cos(follow.pitch), sm = follow.sm;
       // Its speed is measured per simulated second, so pausing or changing speed doesn't make it overshoot,
-      // and it is carried forward to the current time (the agent was last placed in the previous frame).
+      // and it is pulled towards (and kept close to) where the agent is now on its route.
       // Height is only eased (it moves slowly, but in small steps from facet to facet), and kept close.
-      if (timeJumped) sm.wait = t;  // the agent's position catches up with a jump in the next drawn frame
       if (!follow.ok || a.t <= sm.wait || !(t >= sm.t)) Object.assign(sm, { x: a.x, y: a.y, z: a.z, vx: NaN, vz: NaN, px: a.x, pz: a.z, at: a.t, t });
       else {
         const kv = Math.min(1, dt * 10), kp = Math.min(1, dt * 6);
@@ -1514,9 +1513,10 @@ function updateCamera(dt) {
           sm.px = a.x; sm.pz = a.z; sm.at = a.t;
         }
         const dS = t - sm.t; sm.t = t;
-        if (!isFinite(sm.vx)) { sm.vx = 0; sm.vz = 0; }
-        sm.x += sm.vx * dS; sm.z += sm.vz * dS;
-        const ahead = t - a.t, ex = a.x + sm.vx * ahead, ez = a.z + sm.vz * ahead, ey = a.y;  // the agent now
+        if (isFinite(sm.vx)) { sm.x += sm.vx * dS; sm.z += sm.vz * dS; }
+        // the agent now, on its route and keeping to its side as place() does
+        const fl = legs[follow.li], p = pointAt(fl, sAt(fl, t)), dl = Math.hypot(p.dx, p.dz) || 1;
+        const ex = p.x - p.dz / dl * M.side, ez = p.z + p.dx / dl * M.side, ey = a.y;
         sm.x += (ex - sm.x) * kp; sm.z += (ez - sm.z) * kp; sm.y += (ey - sm.y) * Math.min(1, dt * 3);
         const lag = Math.hypot(ex - sm.x, ez - sm.z), max = follow.dist * 0.75;  // never let the agent run off screen
         if (lag > max) { sm.x = ex + (sm.x - ex) * max / lag; sm.z = ez + (sm.z - ez) * max / lag; }
@@ -1710,6 +1710,7 @@ function frame(now) {
   timeJumped = t !== frameT;  // the slider, the arrow keys or world.setTime moved the clock
   if (playing) { t += dt * speed; if (t > +slider.max) { t = +slider.min; timeJumped = true; } }
   frameT = t;
+  if (timeJumped) follow.sm.wait = t;  // in any view: the chase camera snaps until the agent has been placed after the jump
   updateActive();  // before the camera, so a ride can hand over to a rider who just boarded
   updateCamera(dt);
   if (now - lastTiles > 250) { lastTiles = now; updateTiles(focus.x, focus.z); }
