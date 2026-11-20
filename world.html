@@ -1356,7 +1356,7 @@ function place(l, kind, s, c, out) {
   return y0;
 }
 function drawAgents() {
-  frameNo++; updateActive();
+  frameNo++;
   camera.getWorldPosition(camPos); camera.getWorldDirection(camDir);
   let nd = 0; drawn.n = 0; nMoving = 0;
   // a transit vehicle is drawn by one of its riders: the one being followed, if any, so the camera stays on it
@@ -1364,7 +1364,7 @@ function drawAgents() {
   const fVid = fl && fl.pt && kindOf(fl) !== 'walk' ? fl.pt.vid : -1;
   for (const li of active) {
     const l = legs[li], md = modes[l.m], me = li === follow.li;
-    if (!md.shown) { if (me) stopFollow(); continue; }
+    if (!md.shown) continue;
     nMoving++;
     const kind = kindOf(l);
     if (l.pt && kind !== 'walk') {
@@ -1373,14 +1373,15 @@ function drawAgents() {
       vehStamp[l.pt.vid] = frameNo;
     }
     const s = sAt(l, t), p = pointAt(l, s), x = p.x, z = p.z;
-    if (me) { const a = follow.at; a.x = x; a.z = z; a.dx = p.dx; a.dz = p.dz; }  // even where the model can't be placed yet
+    if (me) { const a = follow.at; a.x = x; a.z = z; a.dx = p.dx; a.dz = p.dz; a.t = t; }  // even where the model can't be placed yet
     const dx = x - camPos.x, dz = z - camPos.z, d2 = dx * dx + dz * dz;
     if (d2 > DOT_R * DOT_R && !me) continue;
     if (dx * camDir.x + dz * camDir.z < -60 && d2 > 3600 && !me) continue;  // behind the camera
-    let y;
+    let y, model = false;
     if (d2 < MODEL_R * MODEL_R || me) {
       y = place(l, kind, s, colourOf(l, kind), me ? follow.at : null);
-      if (!isFinite(y)) { y = heightAt(x, z); if (me && isFinite(y)) follow.at.y = y; }
+      model = isFinite(y);
+      if (!model) { y = heightAt(x, z); if (me && isFinite(y)) follow.at.y = y; }
     } else y = heightAt(x, z);
     if (!isFinite(y)) continue;
     if (dotsOn) {
@@ -1390,6 +1391,7 @@ function drawAgents() {
       dots.col[nd * 3] = c.r; dots.col[nd * 3 + 1] = c.g; dots.col[nd * 3 + 2] = c.b; nd++;
     }
     if (drawn.n >= drawn.li.length) { const a = drawn.li, b = drawn.pos; drawn.li = new Int32Array(a.length * 2); drawn.pos = new Float32Array(b.length * 2); drawn.li.set(a); drawn.pos.set(b); }
+    if (!model && !dotsOn) continue;  // nothing on screen to click
     drawn.li[drawn.n] = li; drawn.pos.set([x, y + 1, z], drawn.n * 3); drawn.n++;
   }
   for (const f of Object.values(fleets)) f.flush();
@@ -1401,7 +1403,7 @@ function drawAgents() {
 // like the map page: it opens tilted 62° from straight down and tilts at most 80°
 const MAP_PITCH = (90 - 62) * Math.PI / 180, MIN_PITCH = (90 - 80) * Math.PI / 180;
 const orbit = { target: new THREE.Vector3(0, NaN, 0), dist: 1100, yaw: -0.45, pitch: MAP_PITCH };
-const follow = { li: -1, view: 'chase', yawOff: 0, pitch: 0.26, dist: 12, yaw: NaN, look: { yaw: 0, pitch: -0.05 }, sm: { x: 0, y: 0, z: 0, vx: 0, vz: 0, px: 0, pz: 0 }, at: { x: 0, y: 0, z: 0, dx: 1, dz: 0 }, ok: false, lastS: 0, lastT: 0, kmh: 0 };
+const follow = { li: -1, view: 'chase', yawOff: 0, pitch: 0.26, dist: 12, yaw: NaN, look: { yaw: 0, pitch: -0.05 }, sm: { t: NaN, wait: -Infinity }, at: { x: 0, y: 0, z: 0, dx: 1, dz: 0, t: 0 }, ok: false, lastS: 0, lastT: 0, kmh: 0 };
 let camMode = 'orbit';
 const groundAt = (x, z, fallback) => { const h = heightAt(x, z); return isFinite(h) ? h : fallback; };
 
@@ -1478,17 +1480,17 @@ function updateCamera(dt) {
   } else if (camMode === 'follow') {
     const l = legs[follow.li];
     if (t > l.t1 && !followNext()) { stopFollow(`Arrived at ${hhmm(l.t1)}`); return updateCamera(dt); }
-    if (t < l.t0) { stopFollow(); return updateCamera(dt); }
+    if (t < l.t0 || !modes[l.m].shown) { stopFollow(); return updateCamera(dt); }
     const a = follow.at, kind = kindOf(legs[follow.li]), M = MODELS[kind];
     if (kind !== follow.kind) { follow.kind = kind; follow.dist = Math.max(follow.dist, M.chase); }  // boarded: step back out of the vehicle
     if (!follow.ok) {  // position without drawing, for the first frame
       const s = sAt(legs[follow.li], t), p = pointAt(legs[follow.li], s);
-      a.x = p.x; a.z = p.z; a.dx = p.dx; a.dz = p.dz; a.y = groundAt(p.x, p.z, isFinite(a.y) ? a.y : 400);
+      a.x = p.x; a.z = p.z; a.dx = p.dx; a.dz = p.dz; a.y = groundAt(p.x, p.z, isFinite(a.y) ? a.y : 400); a.t = t;
     }
     const heading = Math.atan2(-a.dx, -a.dz);  // yaw that looks along the direction of travel
     follow.yaw = isFinite(follow.yaw) ? angLerp(follow.yaw, heading, Math.min(1, dt * 2.5)) : heading;
     if (follow.view === 'cockpit') {
-      follow.sm.px = NaN;  // the chase camera starts afresh on the agent when it comes back
+      follow.sm.t = NaN;  // the chase camera starts afresh on the agent when it comes back
       const yaw = follow.yaw + follow.look.yaw, cp = Math.cos(follow.look.pitch);
       const fwd = M.len * (kind === 'walk' || kind === 'bike' ? 0.1 : 0.32);
       camera.position.set(a.x + a.dx * fwd - a.dz * (kind === 'car' ? -0.35 : 0), a.y + M.lift + M.eye, a.z + a.dz * fwd + a.dx * (kind === 'car' ? -0.35 : 0));
@@ -1498,16 +1500,28 @@ function updateCamera(dt) {
       // The camera trails a smoothed copy of the agent: speeds change in steps from link to link and the
       // faceted ground makes small height steps, which shake the view when the camera is fixed to the agent.
       const yaw = follow.yaw + follow.yawOff, cp = Math.cos(follow.pitch), sm = follow.sm;
-      // a ride that just started, or a jump in time: start right on the agent
-      if (!follow.ok || !(Math.hypot(a.x - sm.px, a.z - sm.pz) < 200)) Object.assign(sm, { x: a.x, y: a.y, z: a.z, vx: 0, vz: 0, px: a.x, pz: a.z });
-      else if (dt > 0) {
+      // Its speed is measured per simulated second, so pausing or changing speed doesn't make it overshoot,
+      // and it is carried forward to the current time (the agent was last placed in the previous frame).
+      // Height is only eased (it moves slowly, but in small steps from facet to facet), and kept close.
+      if (timeJumped) sm.wait = t;  // the agent's position catches up with a jump in the next drawn frame
+      if (!follow.ok || a.t <= sm.wait || !(t >= sm.t)) Object.assign(sm, { x: a.x, y: a.y, z: a.z, vx: NaN, vz: NaN, px: a.x, pz: a.z, at: a.t, t });
+      else {
         const kv = Math.min(1, dt * 10), kp = Math.min(1, dt * 6);
-        sm.vx += ((a.x - sm.px) / dt - sm.vx) * kv; sm.vz += ((a.z - sm.pz) / dt - sm.vz) * kv;
-        sm.x += sm.vx * dt; sm.z += sm.vz * dt;
-        sm.x += (a.x - sm.x) * kp; sm.z += (a.z - sm.z) * kp; sm.y += (a.y - sm.y) * Math.min(1, dt * 3);
-        sm.px = a.x; sm.pz = a.z;
-        const lag = Math.hypot(a.x - sm.x, a.z - sm.z), max = follow.dist * 0.75;  // never let the agent run off
-        if (lag > max) { sm.x = a.x + (sm.x - a.x) * max / lag; sm.z = a.z + (sm.z - a.z) * max / lag; }
+        if (a.t > sm.at) {  // a new position of the agent: update the speed estimate
+          const d = a.t - sm.at;
+          const vx = (a.x - sm.px) / d, vz = (a.z - sm.pz) / d;
+          if (isFinite(sm.vx)) { sm.vx += (vx - sm.vx) * kv; sm.vz += (vz - sm.vz) * kv; } else { sm.vx = vx; sm.vz = vz; }  // first speed after a snap
+          sm.px = a.x; sm.pz = a.z; sm.at = a.t;
+        }
+        const dS = t - sm.t; sm.t = t;
+        if (!isFinite(sm.vx)) { sm.vx = 0; sm.vz = 0; }
+        sm.x += sm.vx * dS; sm.z += sm.vz * dS;
+        const ahead = t - a.t, ex = a.x + sm.vx * ahead, ez = a.z + sm.vz * ahead, ey = a.y;  // the agent now
+        sm.x += (ex - sm.x) * kp; sm.z += (ez - sm.z) * kp; sm.y += (ey - sm.y) * Math.min(1, dt * 3);
+        const lag = Math.hypot(ex - sm.x, ez - sm.z), max = follow.dist * 0.75;  // never let the agent run off screen
+        if (lag > max) { sm.x = ex + (sm.x - ex) * max / lag; sm.z = ez + (sm.z - ez) * max / lag; }
+        const my = Math.max(1, follow.dist * 0.1);
+        if (Math.abs(sm.y - ey) > my) sm.y = ey + Math.sign(sm.y - ey) * my;
       }
       const tg = new THREE.Vector3(sm.x, sm.y + M.lift + Math.min(3, M.eye * 0.8), sm.z);
       camera.position.set(tg.x + Math.sin(yaw) * cp * follow.dist, tg.y + Math.sin(follow.pitch) * follow.dist, tg.z + Math.cos(yaw) * cp * follow.dist);
@@ -1572,7 +1586,6 @@ function pick(cx, cy) {
   const v = new THREE.Vector3(); let best = -1, bd = 18;
   for (let k = 0; k < drawn.n; k++) {
     v.set(drawn.pos[k * 3], drawn.pos[k * 3 + 1], drawn.pos[k * 3 + 2]);
-    if (!dotsOn && Math.hypot(v.x - camera.position.x, v.z - camera.position.z) > MODEL_R) continue;  // neither a model nor a dot there
     v.project(camera);
     if (v.z > 1 || v.z < -1) continue;
     const d = Math.hypot((v.x + 1) / 2 * innerWidth - cx, (1 - v.y) / 2 * innerHeight - cy);
@@ -1689,12 +1702,14 @@ function resize() {
 addEventListener('resize', resize); resize();
 
 // ---------- the loop
-let last = performance.now(), lastTiles = 0, lastHud = 0, loaded = false;
+let last = performance.now(), lastTiles = 0, lastHud = 0, loaded = false, frameT = NaN, timeJumped = true;
 const started = performance.now();
 const stats = { cpu: 0, tiles: 0, draws: 0, tris: 0 };
 function frame(now) {
   const dt = Math.min(0.1, (now - last) / 1000); last = now;
-  if (playing) { t += dt * speed; if (t > +slider.max) t = +slider.min; }
+  timeJumped = t !== frameT;  // the slider, the arrow keys or world.setTime moved the clock
+  if (playing) { t += dt * speed; if (t > +slider.max) { t = +slider.min; timeJumped = true; } }
+  frameT = t;
   updateActive();  // before the camera, so a ride can hand over to a rider who just boarded
   updateCamera(dt);
   if (now - lastTiles > 250) { lastTiles = now; updateTiles(focus.x, focus.z); }
