@@ -35,7 +35,9 @@ const env = {
 onmessage = async ({ data: { files, entries, opt } }) => {
   try {
     const { payload, meta, stats } = await build(files, opt, env, entries);
-    const template = await (await fetch(new URL(opt.world ? "../world.html" : "../page.html", import.meta.url))).text();
+    const r = await fetch(new URL(opt.world ? "../world.html" : "../page.html", import.meta.url));
+    if (!r.ok) throw new BuildError(`could not load the page template (HTTP ${r.status}). Reload the site and try again.`);
+    const template = await r.text();
     const page = new Blob(renderParts(template, payload, meta), { type: "text/html" });
     postMessage({ done: { page, title: meta.title, stats } });
   } catch (e) {

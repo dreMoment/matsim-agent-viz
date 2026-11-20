@@ -288,10 +288,12 @@ async function openFolder(read) {
     $("title").placeholder = scenarioName(f.name);
     renderFiles();
     await refreshFromConfig();
+    if (seq !== pickSeq) return;
     if (!files.events && !files.network) $("error").textContent = "No MATSim output files in this folder. Choose the run's output folder (the one with output_events.xml.gz).";
   } catch (e) {
     if (seq !== pickSeq) return;
     $("files").innerHTML = "";
+    $("dropText").textContent = "Drop the run's output folder here";
     $("error").textContent = e.message || "That folder can't be read.";
   } finally {
     if (seq === pickSeq) { checking = false; update(); }
@@ -300,7 +302,8 @@ async function openFolder(read) {
 
 // The coordinate-system hint and the sharing station file follow whichever config file is used.
 async function refreshFromConfig() {
-  const cfg = files.config;
+  const cfg = files.config, here = folder;
+  if (!here) return;
   let crs = null, sharing = null;
   if (cfg) {
     try {
@@ -308,9 +311,9 @@ async function refreshFromConfig() {
       const v = (c.params.coordinateSystem ?? "").trim();
       crs = ["", "atlantis", "none"].includes(v.toLowerCase()) ? null : v;
     } catch { /* the build will say what is wrong */ }
-    sharing = await sharingFor(folder.entries, cfg);
+    sharing = await sharingFor(here.entries, cfg);
   }
-  if (files.config !== cfg) return;
+  if (folder !== here || files.config !== cfg) return;  // a newer folder or config took over
   if (files.sharing === autoSharing && sharing !== autoSharing) { files.sharing = sharing; renderFiles(); }
   autoSharing = sharing;
   $("crs").placeholder = crs ? `${crs} (from config)` : cfg ? "not set in config: guessed from the network" : "guessed from the network (Swiss grids)";
@@ -336,10 +339,13 @@ function chooseFile(role) {
   input.value = "";
   input.onchange = async () => {
     const f = input.files[0];
-    if (!f || worker) return;
+    if (!f || worker || !folder) return;
     files[role] = f;
     renderFiles();
-    if (role === "config") { checking = true; update(); try { await refreshFromConfig(); } finally { checking = false; update(); } }
+    if (role !== "config") return;
+    const seq = ++pickSeq;  // a newer folder or config read wins
+    checking = true; update();
+    try { await refreshFromConfig(); } finally { if (seq === pickSeq) { checking = false; update(); } }
   };
   input.click();
 }
@@ -473,23 +479,28 @@ async function openSaved(file) {
   $("error").textContent = "";
   try {
     const text = await file.text();
-    const world = text.includes("<script>window.DATA = ");
-    const marker = world ? "<script>window.DATA = " : "const DATA = ";
+    // The data is one line of JSON that starts a line of the template; titles and texts come before it.
+    const world = text.includes("\n<script>window.DATA = ");
+    const marker = world ? "\n<script>window.DATA = " : "\nconst DATA = ";
     const start = text.indexOf(marker);
     if (start < 0) throw new Error();
-    const line = text.slice(start + marker.length, text.indexOf("\n", start));  // the data is one line of JSON
+    const eol = text.indexOf("\n", start + 1);
+    const line = text.slice(start + marker.length, eol < 0 ? text.length : eol);
     const payload = JSON.parse(line.replace(/;\s*(<\/script>)?\s*$/, ""));
     if (!Array.isArray(payload.modes) || !Array.isArray(payload.legs)) throw new Error();
-    const doc = new DOMParser().parseFromString(text, "text/html");  // inert: nothing in it runs
+    const doc = new DOMParser().parseFromString(text.slice(0, start), "text/html");  // inert: nothing in it runs
     const title = doc.title.replace(/ · MATSim( world)?$/, "") || file.name.replace(/\.html?$/i, "");
     const eyebrow = doc.querySelector(".eyebrow")?.textContent.trim() || `${title} · last iteration`;
     const note = (/(\S[^·\n]*?) · click a mode to hide it/.exec(doc.body.textContent) ?? [])[1] ?? "";
-    const template = await (await fetch(world ? "world.html" : "page.html")).text();
+    const r = await fetch(world ? "world.html" : "page.html");
+    if (!r.ok) { $("error").textContent = `Could not load the page template (HTTP ${r.status}). Reload the site and try again.`; return; }
+    const template = await r.text();
     setPage(new Blob(renderParts(template, payload, { title, eyebrow, note }), { type: "text/html" }),
       title + (world ? " · 3D world" : ""), file.name);
     openViewer();
-  } catch {
-    $("error").textContent = `${file.name} is not a page saved by this tool.`;
+  } catch (e) {
+    $("error").textContent = e instanceof RangeError ? `${file.name} is too large to open in this browser.`
+      : `${file.name} is not a page saved by this tool.`;
   }
 }
 

@@ -13,7 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import proj4 from "../vendor/proj4.mjs";
-import { build, renderParts, findInputs, sharingFor, scenarioName, BuildError, INPUTS } from "../js/engine.js";
+import { build, renderParts, findInputs, sharingFor, readConfig, BuildError, INPUTS } from "../js/engine.js";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const USAGE = "usage: node tools/build.mjs RUN_FOLDER [--world] [--out FILE] [--sample 0.1] [--title TEXT] [--crs CRS]\n" +
@@ -63,6 +63,21 @@ async function listFolder(dir) {
   return out;
 }
 
+/** The station file the config names, looked up outside the run folder too: its path is relative to the original
+ * config, which usually sits in the folder above the output. Like the Python tool did. */
+async function sharingNearby(dir, config) {
+  let cfg;
+  try { cfg = await readConfig(config); } catch { return null; }
+  for (const svc of cfg.services) {
+    if ((svc.serviceScheme ?? "").toLowerCase() === "freefloating") continue;
+    const p = (svc.serviceInputFile ?? "").replace(/\\/g, "/");
+    if (!p) continue;
+    const cands = path.isAbsolute(p) ? [p] : [path.resolve(dir, "..", p), path.resolve(dir, "..", path.basename(p))];
+    for (const c of cands) if (await kindOf(c) === "file") return asFile(c);
+  }
+  return null;
+}
+
 /** 'Zurich_10pct/simulation_output' -> the folder name to title the page by: 'Zurich_10pct'. */
 const titleFolder = dir => path.resolve(dir).split(path.sep)
   .filter(p => p && !["simulation_output", "output"].includes(p.toLowerCase())).pop() ?? "";
@@ -91,6 +106,7 @@ try {
     files[role] = await asFile(p);
   }
   if (opt.files.config && !opt.files.sharing) files.sharing = await sharingFor(entries, files.config);
+  if (!files.sharing && files.config && !opt.files.sharing) files.sharing = await sharingNearby(opt.dir, files.config);
   // Overpass refuses Node's default User-Agent. (Browsers send their own and must not set one: that needs a preflight.)
   const withAgent = (url, init = {}) => fetch(url, { ...init, headers: { ...init.headers, "User-Agent": "matsim-agent-viz" } });
   const env = {

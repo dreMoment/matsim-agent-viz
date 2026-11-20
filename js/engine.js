@@ -210,12 +210,15 @@ async function scan(file, names, onTag, { withText = false, onBytes } = {}) {
           pos = gt + 1;
           continue;
         }
-        if (root === null) { if (name[0] !== "?" && name[0] !== "!") root = name; }
-        else if (name.length === root.length + 1 && name === "/" + root) closed = true;
         // Another tag: skip it. A ">" inside one of its values ends it early, but values hold no "<",
         // so the next "<" is still the next tag.
         const gt = text.indexOf(">", e);
         if (gt < 0) { pos = lt; break; }
+        // Track the root element, to tell a complete file from a cut-off one. (No caller asks for the
+        // root's own tag in `names`, so it always comes through here.)
+        if (root === null) {
+          if (name[0] !== "?" && name[0] !== "!") { root = name; if (text.charCodeAt(gt - 1) === 47) closed = true; }  // <root/>
+        } else if (name.length === root.length + 1 && name === "/" + root) closed = true;
         pos = gt + 1;
       }
       rest = text.slice(pos);
@@ -251,6 +254,7 @@ function parseTree(text) {
     stack[stack.length - 1].children.push(el);
     if (text[r[1] - 1] !== "/") stack.push(el);
   }
+  root.complete = stack.length === 1 && root.children.length > 0;  // every element closed
   return root;
 }
 
@@ -265,6 +269,7 @@ export async function readConfig(file) {
     if (e instanceof BuildError) throw e;
     fail(`${file.name} could not be read (${e.message || e}).`);
   }
+  if (!tree.complete) fail(`${file.name} ends too early or is not XML. Is the file complete?`);
   const params = {}, services = [];
   for (const el of walkTree(tree)) {
     if (el.tag === "param" && el.attrs.name && !(el.attrs.name in params)) params[el.attrs.name] = el.attrs.value ?? "";
@@ -1319,9 +1324,6 @@ export function renderParts(template, payload, { title, eyebrow, note }) {
   const fill = { __DATA__: json, __NOTE__: escapeHtml(note), __EYEBROW__: escapeHtml(eyebrow), __TITLE__: escapeHtml(title) };
   return template.split(/(__DATA__|__NOTE__|__EYEBROW__|__TITLE__)/).map(p => fill[p] ?? p);
 }
-
-/** The page as one string. */
-export const renderPage = (template, payload, meta) => renderParts(template, payload, meta).join("");
 
 // ---------------------------------------------------------------- the build
 /**
