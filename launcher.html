@@ -79,6 +79,12 @@
   <label class="h">Input files</label>
   <div class="files" id="files"><div class="empty">No folder chosen yet.</div></div>
 
+  <label class="h">View</label>
+  <div class="seg" id="kind">
+    <button data-v="map" class="on">Map</button><button data-v="world">3D world</button>
+  </div>
+  <div class="hint" id="kindHint"></div>
+
   <label class="h">Agents to show</label>
   <div class="seg" id="sample">
     <button data-v="0.01">1%</button><button data-v="0.05">5%</button><button data-v="0.1" class="on">10%</button><button data-v="0.25">25%</button><button data-v="1">All</button>
@@ -118,6 +124,11 @@ const ROLE_LABEL = { events: "Events", network: "Network", schedule: "Transit sc
 let current = null;      // last /api/check result, only while it matches the folder field
 let files = {};          // role -> chosen path (or null)
 let sample = 0.1;
+let kind = "map";        // "map": agents as dots on a map; "world": a 3D world to fly through, with vehicles
+const KIND_HINT = {
+  map: "Agents as dots over a tilted map with terrain and buildings.",
+  world: "A 3D world to fly through: vehicles, walkers, buildings and trees. Click a vehicle to follow it.",
+};
 let running = false;     // a build is in progress: inputs are locked
 let stopped = false;     // the local server is gone
 let checkSeq = 0;        // drops /api/check answers that arrive after the folder changed again
@@ -135,7 +146,7 @@ const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;",
 function save() {
   if (!current) return;
   const swapped = Object.fromEntries(Object.keys(files).filter(r => files[r] !== current.files[r].path).map(r => [r, files[r]]));
-  const data = { dir: current.dir, files: swapped, sample, title: $("title").value, crs: $("crs").value };
+  const data = { dir: current.dir, files: swapped, sample, kind, title: $("title").value, crs: $("crs").value };
   pendingSave = data;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(flushSave, 300);
@@ -195,6 +206,13 @@ function setRunning(on) {
 function showEmpty(text) {
   current = null; files = {};
   $("files").innerHTML = `<div class="empty">${esc(text)}</div>`;
+  update();
+}
+
+function setKind(v) {
+  kind = v === "world" ? "world" : "map";
+  $("kind").querySelectorAll("button").forEach(x => x.classList.toggle("on", x.dataset.v === kind));
+  $("kindHint").textContent = KIND_HINT[kind];
   update();
 }
 
@@ -282,13 +300,13 @@ function update() {
   const locked = running || stopped;
   const ready = current && Object.entries(current.files).every(([r, f]) => !f.required || files[r]);
   $("build").disabled = !ready || locked || refreshing > 0;
-  const ex = current && current.existing;
+  const ex = current && (kind === "world" ? current.existingWorld : current.existing);
   $("openExisting").hidden = !ex || locked;
   if (ex) {
     const when = new Date(ex.mtime * 1000).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
     $("openExisting").textContent = `Open last page (${when}, ${mb(ex.size)})`;
   }
-  document.querySelectorAll("#dir, #pickDir, #title, #crs, #sample button, #files button")
+  document.querySelectorAll("#dir, #pickDir, #title, #crs, #sample button, #kind button, #files button")
     .forEach(el => el.disabled = locked);
   $("quit").disabled = stopped;
 }
@@ -312,6 +330,7 @@ $("dir").addEventListener("input", () => { checkSeq++; showEmpty("Press Enter to
 $("dir").addEventListener("change", e => check(e.target.value));
 $("dir").addEventListener("keydown", e => { if (e.key === "Enter") check(e.target.value); });
 $("sample").querySelectorAll("button").forEach(b => b.onclick = () => { setSample(+b.dataset.v); save(); });
+$("kind").querySelectorAll("button").forEach(b => b.onclick = () => { setKind(b.dataset.v); save(); });
 $("title").addEventListener("input", save);
 $("crs").addEventListener("input", save);
 
@@ -320,7 +339,7 @@ $("build").onclick = async () => {
   $("error").textContent = ""; $("note").textContent = ""; $("log").textContent = "";
   save();
   setRunning(true);
-  const res = await api("/api/build", { dir: current.dir, files, sample, title: $("title").value.trim(), crs: $("crs").value.trim() });
+  const res = await api("/api/build", { dir: current.dir, files, sample, world: kind === "world", title: $("title").value.trim(), crs: $("crs").value.trim() });
   if (!res) return;
   if (res.error) { setRunning(false); $("error").textContent = res.error; return; }
   poll();
@@ -338,7 +357,7 @@ async function poll() {
 }
 
 $("openExisting").onclick = async () => {
-  const res = await api("/api/open", { path: current.out });
+  const res = await api("/api/open", { path: kind === "world" ? current.worldOut : current.out });
   if (!res) return;
   if (res.error) { $("error").textContent = res.error; return; }
   openPage(res.view, res.size);
@@ -360,6 +379,7 @@ async function init() {
   const saved = await api("/api/settings");
   if (!saved) return;
   setSample(saved.sample || 0.1);
+  setKind(saved.kind);
   if (saved.dir) { $("dir").value = saved.dir; await check(saved.dir, saved); }
   if (s.running) { setRunning(true); poll(); }
 }

@@ -1,6 +1,6 @@
 # Agent instructions
 
-A single-script tool. `matsim_agent_viz.py` reads a MATSim run and fills `page.html` (MapLibre, no build step). See README.md for usage.
+A single-script tool. `matsim_agent_viz.py` reads a MATSim run and fills `page.html` (MapLibre, no build step), or with `--world` `world.html` (a three.js world to fly through, no build step). See README.md for usage.
 
 ## Data
 
@@ -18,3 +18,5 @@ Real MATSim runs hold synthetic-population data that may be protected. Before to
 1. Build the fake run.
 2. Serve the page on 127.0.0.1.
 3. Look at it in a real browser at desktop size. Phone sizes are out of scope.
+
+For `world.html`, build the fake run with `--osm` so the streets match the map. The page exposes `window.world` (`follow(i)`, `at(x, z)`, `setTime(s)`, `stats`) for checks from the console.
