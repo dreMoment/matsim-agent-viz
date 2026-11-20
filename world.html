@@ -1403,7 +1403,7 @@ function drawAgents() {
 // like the map page: it opens tilted 62° from straight down and tilts at most 80°
 const MAP_PITCH = (90 - 62) * Math.PI / 180, MIN_PITCH = (90 - 80) * Math.PI / 180;
 const orbit = { target: new THREE.Vector3(0, NaN, 0), dist: 1100, yaw: -0.45, pitch: MAP_PITCH };
-const follow = { li: -1, view: 'chase', yawOff: 0, pitch: 0.26, dist: 12, yaw: NaN, look: { yaw: 0, pitch: -0.05 }, sm: { t: NaN, wait: -Infinity }, at: { x: 0, y: 0, z: 0, dx: 1, dz: 0, t: 0 }, ok: false, lastS: 0, lastT: 0, kmh: 0 };
+const follow = { li: -1, view: 'chase', yawOff: 0, pitch: 0.26, dist: 12, yaw: NaN, look: { yaw: 0, pitch: -0.05 }, sm: { t: NaN, snap: 0 }, at: { x: 0, y: 0, z: 0, dx: 1, dz: 0, t: 0 }, ok: false, lastS: 0, lastT: 0, kmh: 0 };
 let camMode = 'orbit';
 const groundAt = (x, z, fallback) => { const h = heightAt(x, z); return isFinite(h) ? h : fallback; };
 
@@ -1428,7 +1428,7 @@ function startFollow(li) {
   const l = legs[li]; if (!l) return;
   if (camMode !== 'follow') setMode('follow');
   follow.li = li; follow.yaw = NaN; follow.yawOff = 0; follow.ok = false; follow.kmh = 0; follow.lastT = t; follow.lastS = sAt(l, t);
-  follow.kind = kindOf(l); follow.dist = MODELS[follow.kind].chase; follow.sm.wait = t;
+  follow.kind = kindOf(l); follow.dist = MODELS[follow.kind].chase;
   $('follow').hidden = false;
   updateFollowCard(true);
 }
@@ -1503,7 +1503,10 @@ function updateCamera(dt) {
       // Its speed is measured per simulated second, so pausing or changing speed doesn't make it overshoot,
       // and it is pulled towards (and kept close to) where the agent is now on its route.
       // Height is only eased (it moves slowly, but in small steps from facet to facet), and kept close.
-      if (!follow.ok || a.t <= sm.wait || !(t >= sm.t)) Object.assign(sm, { x: a.x, y: a.y, z: a.z, vx: NaN, vz: NaN, px: a.x, pz: a.z, at: a.t, t });
+      // Snap onto the agent for two frames after a ride starts or the clock jumps: the frame the agent is
+      // first placed, and the next one, so the speed estimate starts from a placed position.
+      if (!follow.ok) sm.snap = 2;
+      if (sm.snap > 0 || !(t >= sm.t)) { Object.assign(sm, { x: a.x, y: a.y, z: a.z, vx: NaN, vz: NaN, px: a.x, pz: a.z, at: a.t, t }); sm.snap--; }
       else {
         const kv = Math.min(1, dt * 10), kp = Math.min(1, dt * 6);
         if (a.t > sm.at) {  // a new position of the agent: update the speed estimate
@@ -1514,9 +1517,11 @@ function updateCamera(dt) {
         }
         const dS = t - sm.t; sm.t = t;
         if (isFinite(sm.vx)) { sm.x += sm.vx * dS; sm.z += sm.vz * dS; }
-        // the agent now, on its route and keeping to its side as place() does
-        const fl = legs[follow.li], p = pointAt(fl, sAt(fl, t)), dl = Math.hypot(p.dx, p.dz) || 1;
-        const ex = p.x - p.dz / dl * M.side, ez = p.z + p.dx / dl * M.side, ey = a.y;
+        // the agent now: its route position, centred and kept to its side as place() does
+        const fl = legs[follow.li], s = sAt(fl, t), f = pointAt(fl, s + M.len / 2), b = pointAt(fl, s - M.len / 2);
+        let cx = (f.x + b.x) / 2, cz = (f.z + b.z) / 2, ux = f.x - b.x, uz = f.z - b.z, ul = Math.hypot(ux, uz);
+        if (ul < M.len * 0.3) { const m = pointAt(fl, s); cx = m.x; cz = m.z; ux = m.dx; uz = m.dz; ul = Math.hypot(ux, uz) || 1; }
+        const ex = cx - uz / ul * M.side, ez = cz + ux / ul * M.side, ey = a.y;
         sm.x += (ex - sm.x) * kp; sm.z += (ez - sm.z) * kp; sm.y += (ey - sm.y) * Math.min(1, dt * 3);
         const lag = Math.hypot(ex - sm.x, ez - sm.z), max = follow.dist * 0.75;  // never let the agent run off screen
         if (lag > max) { sm.x = ex + (sm.x - ex) * max / lag; sm.z = ez + (sm.z - ez) * max / lag; }
@@ -1710,7 +1715,7 @@ function frame(now) {
   timeJumped = t !== frameT;  // the slider, the arrow keys or world.setTime moved the clock
   if (playing) { t += dt * speed; if (t > +slider.max) { t = +slider.min; timeJumped = true; } }
   frameT = t;
-  if (timeJumped) follow.sm.wait = t;  // in any view: the chase camera snaps until the agent has been placed after the jump
+  if (timeJumped) follow.sm.snap = 2;  // in any view: the chase camera snaps until the agent has been placed after the jump
   updateActive();  // before the camera, so a ride can hand over to a rider who just boarded
   updateCamera(dt);
   if (now - lastTiles > 250) { lastTiles = now; updateTiles(focus.x, focus.z); }
