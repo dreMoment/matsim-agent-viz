@@ -483,6 +483,7 @@ async function openSaved(fileOrPromise) {
   let file = { name: "The file" };
   try {
     file = await fileOrPromise;
+    if (seq !== openSeq) return;  // superseded: don't read it at all
     const text = await file.text();
     if (seq !== openSeq) return;
     // The data is one line of JSON right after the template's "<script>"; titles and texts come before it,
