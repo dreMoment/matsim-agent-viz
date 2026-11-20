@@ -111,17 +111,15 @@
     <kbd>Space</kbd><span>play / pause</span>
     <kbd>← →</kbd><span>±5 min</span>
     <kbd>1–5</kbd><span>speed</span>
-    <kbd>W A S D</kbd><span>move (Q E turn)</span>
-    <kbd>F</kbd><span>fly freely</span>
     <kbd>R</kbd><span>ride along with someone nearby</span>
     <kbd>V</kbd><span>chase / on-board view</span>
-    <kbd>Esc</kbd><span>stop riding / flying</span>
+    <kbd>Esc</kbd><span>stop riding</span>
     <kbd>M</kbd><span>dots far away</span>
     <kbd>H</kbd><span>hide the panels</span>
   </div>
 </div>
 
-<div class="card hint" id="hint">Drag to move · Right-drag to turn · Scroll to zoom · <b>F</b> fly · <b>Click</b> a vehicle or walker to ride along</div>
+<div class="card hint" id="hint">Drag to move · Right-drag to turn · Scroll to zoom · <b>Click</b> a vehicle or walker to ride along</div>
 
 <div class="card follow" id="follow" hidden>
   <div class="eyebrow" id="fEyebrow">Riding along</div>
@@ -1387,23 +1385,22 @@ function drawAgents() {
   dots.mesh.geometry.attributes.position.needsUpdate = true; dots.mesh.geometry.attributes.color.needsUpdate = true;
 }
 
-// ---------- camera: orbit (default), fly, or ride along with one agent
-const orbit = { target: new THREE.Vector3(0, NaN, 0), dist: 1100, yaw: -0.45, pitch: 0.36 };
-const fly = { pos: new THREE.Vector3(), yaw: 0, pitch: -0.3 };
+// ---------- camera: map-style orbit (default), or ride along with one agent
+// like the map page: it opens tilted 62° from straight down and tilts at most 80°
+const MAP_PITCH = (90 - 62) * Math.PI / 180, MIN_PITCH = (90 - 80) * Math.PI / 180;
+const orbit = { target: new THREE.Vector3(0, NaN, 0), dist: 1100, yaw: -0.45, pitch: MAP_PITCH };
 const follow = { li: -1, view: 'chase', yawOff: 0, pitch: 0.26, dist: 12, yaw: NaN, look: { yaw: 0, pitch: -0.05 }, at: { x: 0, y: 0, z: 0, dx: 1, dz: 0 }, ok: false, lastS: 0, lastT: 0, kmh: 0 };
 let camMode = 'orbit';
-const keys = new Set();
 const groundAt = (x, z, fallback) => { const h = heightAt(x, z); return isFinite(h) ? h : fallback; };
 
 function setMode(m) {
   if (m === camMode) return;
-  if (camMode === 'fly' && document.pointerLockElement) document.exitPointerLock();
-  if (m === 'fly') {
-    fly.pos.copy(camera.position);
-    const d = new THREE.Vector3(); camera.getWorldDirection(d);
-    fly.yaw = Math.atan2(-d.x, -d.z); fly.pitch = Math.asin(Math.max(-1, Math.min(1, d.y)));
-  }
-  if (m === 'orbit') {
+  if (m === 'orbit' && camMode === 'follow') {
+    // back to the map view, above where the ride ended
+    const a = follow.at;
+    orbit.target.set(a.x, a.y, a.z);
+    Object.assign(orbit, { dist: 450, yaw: isFinite(follow.yaw) ? follow.yaw : orbit.yaw, pitch: MAP_PITCH });
+  } else if (m === 'orbit') {
     const d = new THREE.Vector3(); camera.getWorldDirection(d);
     const g = groundAt(camera.position.x, camera.position.z, 0), alt = Math.max(20, camera.position.y - g);
     const dist = d.y < -0.08 ? Math.min(4000, alt / -d.y) : Math.min(1500, alt * 3);
@@ -1411,15 +1408,14 @@ function setMode(m) {
     orbit.target.y = groundAt(orbit.target.x, orbit.target.z, g);
     orbit.dist = camera.position.distanceTo(orbit.target);
     orbit.yaw = Math.atan2(camera.position.x - orbit.target.x, camera.position.z - orbit.target.z);
-    orbit.pitch = Math.max(0.06, Math.min(1.5, Math.asin((camera.position.y - orbit.target.y) / orbit.dist)));
+    orbit.pitch = Math.max(MIN_PITCH, Math.min(1.53, Math.asin((camera.position.y - orbit.target.y) / orbit.dist)));
   }
   if (camMode === 'follow' && m !== 'follow') { follow.li = -1; $('follow').hidden = true; }
   camMode = m;
   $('hint').innerHTML = HINTS[m];
 }
 const HINTS = {
-  orbit: 'Drag to move · Right-drag to turn · Scroll to zoom · <b>F</b> fly · <b>Click</b> a vehicle or walker to ride along',
-  fly: '<b>Fly</b> · W A S D move · Q E down / up · Shift faster · drag or click to look around · <b>F</b> or <b>Esc</b> to land',
+  orbit: 'Drag to move · Right-drag to turn · Scroll to zoom · <b>Click</b> a vehicle or walker to ride along',
   follow: 'Drag to look around · Scroll to zoom · <b>V</b> chase / on board · <b>R</b> someone else · <b>Esc</b> stop riding',
 };
 
@@ -1466,41 +1462,16 @@ function followNext() {
 const focus = { x: 0, z: 0 };
 const angLerp = (a, b, f) => a + Math.atan2(Math.sin(b - a), Math.cos(b - a)) * f;
 function updateCamera(dt) {
-  const shift = keys.has('ShiftLeft') || keys.has('ShiftRight');
   if (camMode === 'orbit') {
     const tg = orbit.target, g = heightAt(tg.x, tg.z);
     if (isFinite(g)) tg.y = isFinite(tg.y) ? tg.y + (g - tg.y) * Math.min(1, dt * 6) : g;
     if (!isFinite(tg.y)) tg.y = 400;
-    const v = orbit.dist * 0.9 * dt * (shift ? 3 : 1);
-    const fx = -Math.sin(orbit.yaw), fz = -Math.cos(orbit.yaw);
-    if (keys.has('KeyW')) { tg.x += fx * v; tg.z += fz * v; }
-    if (keys.has('KeyS')) { tg.x -= fx * v; tg.z -= fz * v; }
-    if (keys.has('KeyA')) { tg.x += fz * v; tg.z -= fx * v; }
-    if (keys.has('KeyD')) { tg.x -= fz * v; tg.z += fx * v; }
-    if (keys.has('KeyQ')) orbit.yaw += 1.2 * dt;
-    if (keys.has('KeyE')) orbit.yaw -= 1.2 * dt;
     const cp = Math.cos(orbit.pitch);
     camera.position.set(tg.x + Math.sin(orbit.yaw) * cp * orbit.dist, tg.y + Math.sin(orbit.pitch) * orbit.dist, tg.z + Math.cos(orbit.yaw) * cp * orbit.dist);
     const gc = heightAt(camera.position.x, camera.position.z);
     if (isFinite(gc) && camera.position.y < gc + 3) camera.position.y = gc + 3;
     camera.lookAt(tg);
     focus.x = tg.x; focus.z = tg.z;
-  } else if (camMode === 'fly') {
-    const p = fly.pos, g = groundAt(p.x, p.z, 0), alt = Math.max(1, p.y - g);
-    const v = Math.min(900, Math.max(14, alt * 0.9)) * dt * (shift ? 4 : 1);
-    const cp = Math.cos(fly.pitch), fx = -Math.sin(fly.yaw) * cp, fy = Math.sin(fly.pitch), fz = -Math.cos(fly.yaw) * cp;
-    const rx = Math.cos(fly.yaw), rz = -Math.sin(fly.yaw);
-    if (keys.has('KeyW')) p.add({ x: fx * v, y: fy * v, z: fz * v });
-    if (keys.has('KeyS')) p.add({ x: -fx * v, y: -fy * v, z: -fz * v });
-    if (keys.has('KeyD')) { p.x += rx * v; p.z += rz * v; }
-    if (keys.has('KeyA')) { p.x -= rx * v; p.z -= rz * v; }
-    if (keys.has('KeyE')) p.y += v;
-    if (keys.has('KeyQ')) p.y -= v;
-    const g2 = heightAt(p.x, p.z); if (isFinite(g2) && p.y < g2 + 2) p.y = g2 + 2;
-    camera.position.copy(p);
-    camera.lookAt(p.x + fx, p.y + fy, p.z + fz);
-    const ahead = Math.min(1500, alt * 1.2), hl = Math.hypot(fx, fz) || 1;
-    focus.x = p.x + fx / hl * ahead; focus.z = p.z + fz / hl * ahead;
   } else if (camMode === 'follow') {
     const l = legs[follow.li];
     if (t > l.t1 && !followNext()) { stopFollow(`Arrived at ${hhmm(l.t1)}`); return updateCamera(dt); }
@@ -1540,7 +1511,6 @@ let drag = null;
 canvas.addEventListener('contextmenu', e => e.preventDefault());
 canvas.addEventListener('pointerdown', e => {
   canvas.focus();
-  if (camMode === 'fly' && e.button === 0 && !document.pointerLockElement) canvas.requestPointerLock?.();
   drag = { x: e.clientX, y: e.clientY, x0: e.clientX, y0: e.clientY, button: e.button, rotate: e.button === 2 || e.ctrlKey || e.altKey || e.shiftKey || e.metaKey };
   canvas.setPointerCapture(e.pointerId);
 });
@@ -1553,24 +1523,20 @@ function groundHit(cx, cy, y) {
   return ray.ray.origin.clone().addScaledVector(d, Math.min(k, 40000));
 }
 canvas.addEventListener('pointermove', e => {
-  if (camMode === 'fly' && document.pointerLockElement === canvas) {
-    fly.yaw -= e.movementX * 0.0022; fly.pitch = Math.max(-1.5, Math.min(1.5, fly.pitch - e.movementY * 0.0022)); return;
-  }
   if (!drag) return;
   const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
   if (camMode === 'orbit') {
-    if (drag.rotate) { orbit.yaw -= dx * 0.006; orbit.pitch = Math.max(0.05, Math.min(1.53, orbit.pitch + dy * 0.005)); }
+    if (drag.rotate) { orbit.yaw -= dx * 0.006; orbit.pitch = Math.max(MIN_PITCH, Math.min(1.53, orbit.pitch + dy * 0.005)); }
     else {
       const a = groundHit(drag.x, drag.y, orbit.target.y), b = groundHit(e.clientX, e.clientY, orbit.target.y);
       if (a && b) { orbit.target.x += a.x - b.x; orbit.target.z += a.z - b.z; }
     }
-  } else if (camMode === 'fly') { fly.yaw += dx * 0.004; fly.pitch = Math.max(-1.5, Math.min(1.5, fly.pitch + dy * 0.004)); }
-  else if (follow.view === 'cockpit') { follow.look.yaw += dx * 0.004; follow.look.pitch = Math.max(-1.2, Math.min(1.2, follow.look.pitch + dy * 0.004)); }
+  } else if (follow.view === 'cockpit') { follow.look.yaw += dx * 0.004; follow.look.pitch = Math.max(-1.2, Math.min(1.2, follow.look.pitch + dy * 0.004)); }
   else { follow.yawOff -= dx * 0.006; follow.pitch = Math.max(-0.05, Math.min(1.45, follow.pitch + dy * 0.005)); }
   drag.x = e.clientX; drag.y = e.clientY;
 });
 canvas.addEventListener('pointerup', e => {
-  if (drag && drag.button === 0 && Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 5 && camMode !== 'fly') pick(e.clientX, e.clientY);
+  if (drag && drag.button === 0 && Math.hypot(e.clientX - drag.x0, e.clientY - drag.y0) < 5 ) pick(e.clientX, e.clientY);
   drag = null;
 });
 canvas.addEventListener('wheel', e => {
@@ -1578,10 +1544,9 @@ canvas.addEventListener('wheel', e => {
   const f = Math.exp(Math.max(-60, Math.min(60, e.deltaY)) * 0.0022);
   if (camMode === 'orbit') {
     const nd = Math.max(6, Math.min(30000, orbit.dist * f)), h = groundHit(e.clientX, e.clientY, orbit.target.y);
-    if (h && f < 1) { const k = 1 - nd / orbit.dist; orbit.target.x += (h.x - orbit.target.x) * k; orbit.target.z += (h.z - orbit.target.z) * k; }
+    if (h) { const k = 1 - nd / orbit.dist; orbit.target.x += (h.x - orbit.target.x) * k; orbit.target.z += (h.z - orbit.target.z) * k; }
     orbit.dist = nd;
   } else if (camMode === 'follow') follow.dist = Math.max(3, Math.min(800, follow.dist * f));
-  else if (camMode === 'fly') { fly.pos.y += (f - 1) * 200; }
 }, { passive: false });
 function pick(cx, cy) {
   const v = new THREE.Vector3(); let best = -1, bd = 18;
@@ -1629,7 +1594,7 @@ function updateLight() {
   sun.intensity = day ? 3.2 * Math.min(1, 0.25 + se * 2.2) : 0.55;
   cloudMat.emissive.copy(hor).multiplyScalar(0.5);
   // shadows cover the area around the focus
-  const S = camMode === 'follow' ? 220 : camMode === 'fly' ? 700 : Math.max(150, Math.min(1000, orbit.dist * 0.85));
+  const S = camMode === 'follow' ? 220 : Math.max(150, Math.min(1000, orbit.dist * 0.85));
   const sc = sun.shadow.camera;
   if (sc.right !== S) { sc.left = -S; sc.right = S; sc.top = S; sc.bottom = -S; sc.updateProjectionMatrix(); }
   const fy = groundAt(focus.x, focus.z, 400);
@@ -1682,12 +1647,10 @@ function toast(msg) { const el = $('toast'); el.textContent = msg; el.classList.
 addEventListener('keydown', e => {
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (document.activeElement === slider && /Arrow/.test(e.key)) return;
-  keys.add(e.code);
   if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing); }
   else if (e.key === 'ArrowLeft') { e.preventDefault(); t = Math.max(+slider.min, t - 300); }
   else if (e.key === 'ArrowRight') { e.preventDefault(); t = Math.min(+slider.max, t + 300); }
   else if (e.key >= '1' && e.key <= '5') { speed = SPEEDS[+e.key - 1][0]; drawSpeed(); }
-  else if (e.code === 'KeyF') setMode(camMode === 'fly' ? 'orbit' : 'fly');
   else if (e.code === 'KeyR') rideRandom();
   else if (e.code === 'KeyV' && camMode === 'follow') { follow.view = follow.view === 'chase' ? 'cockpit' : 'chase'; follow.look.yaw = 0; follow.look.pitch = -0.05; setSeg('viewSeg', follow.view); }
   else if (e.code === 'KeyM') { dotsOn = !dotsOn; dots.mesh.visible = dotsOn; setSeg('dotSeg', dotsOn ? 1 : 0); }
@@ -1696,8 +1659,6 @@ addEventListener('keydown', e => {
   else if (e.key === 'Escape') { if (camMode !== 'orbit') setMode('orbit'); else document.body.classList.remove('bare'); }
   else if (e.key === '?') $('keys').classList.toggle('open');
 });
-addEventListener('keyup', e => keys.delete(e.code));
-addEventListener('blur', () => keys.clear());
 
 function resize() {
   renderer.setSize(innerWidth, innerHeight, false);

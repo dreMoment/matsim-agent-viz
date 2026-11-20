@@ -3,7 +3,7 @@
 # dependencies = ["pyproj", "scipy"]
 # ///
 """3D animation of the last iteration: agents as dots on a map, or as vehicles in a
-3D world you can fly through (--world).
+3D world you can explore (--world).
 
 Reads the final outputs of a MATSim run and writes one HTML page. Open it in
 a browser to watch a sample of agents move over a 3D map of the area, with
@@ -52,7 +52,7 @@ Usage:
 Pages are served on 127.0.0.1 only. Opening the HTML file directly may not
 work in some viewers (T3, Quick Look), because they block WebGL.
 Options:
-  --world         a 3D world to fly through (agents_world.html) instead of the map
+  --world         a 3D world to explore (agents_world.html) instead of the map
   --sample 0.1    share of agents to show (0-1)
   --title TEXT    scenario name on the page
   --crs EPSG:xxxx coordinate system, if output_config does not set one
@@ -1091,7 +1091,7 @@ def to_payload(legs, crs: CRS, sharing=None, tracks=None, vehicles=False):
 
 
 PAGE = Path(__file__).with_name("page.html")
-WORLD_PAGE = Path(__file__).with_name("world.html")  # the 3D world you can fly through (--world)
+WORLD_PAGE = Path(__file__).with_name("world.html")  # the 3D world you can explore (--world)
 LAUNCHER = Path(__file__).with_name("launcher.html")
 DEFAULT_OUT = "agents_3d.html"
 DEFAULT_WORLD_OUT = "agents_world.html"
@@ -1204,7 +1204,7 @@ def main():
                     help="MATSim output folder. Leave it out to open the launcher in your browser.")
     ap.add_argument("--run-dir", dest="run_dir_opt", type=Path, help=argparse.SUPPRESS)
     ap.add_argument("--world", action="store_true",
-                    help="build the 3D world you can fly through, with vehicles and buildings, instead of the map")
+                    help="build the 3D world you can explore, with vehicles and buildings, instead of the map")
     ap.add_argument("--out", type=Path, help=f"HTML file to write (default: {DEFAULT_OUT} in the run folder, "
                                              f"{DEFAULT_WORLD_OUT} with --world)")
     ap.add_argument("--sample", type=float, default=0.1, help="share of agents to show, 0-1 (default 0.1)")

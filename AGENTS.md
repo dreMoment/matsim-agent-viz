@@ -1,6 +1,6 @@
 # Agent instructions
 
-A single-script tool. `matsim_agent_viz.py` reads a MATSim run and fills `page.html` (MapLibre, no build step), or with `--world` `world.html` (a three.js world to fly through, no build step). See README.md for usage.
+A single-script tool. `matsim_agent_viz.py` reads a MATSim run and fills `page.html` (MapLibre, no build step), or with `--world` `world.html` (a three.js world to explore, no build step). See README.md for usage.
 
 ## Data
 

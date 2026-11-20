@@ -6,7 +6,7 @@ A minimal 3D animation of the last iteration of a MATSim run. Each agent on a le
 
 *The synthetic test run from `examples/make_fake_run.py --osm`, not real data.*
 
-With `--world` it builds a second kind of page instead: a 3D world you can fly through, with cars, buses, trams, trains, bikes and walkers on streets lined with buildings and trees. See [The 3D world](#the-3d-world---world).
+With `--world` it builds a second kind of page instead: a 3D world you can explore, with cars, buses, trams, trains, bikes and walkers on streets lined with buildings and trees. See [The 3D world](#the-3d-world---world).
 
 One Python script reads the run's final outputs and writes a single HTML page. The map, terrain and building tiles come from OpenFreeMap and Mapterhorn (no API key), so the page needs internet. The simulation data stays inside the file.
 
@@ -35,7 +35,7 @@ The page is written to `agents_3d.html` in the run folder (change this with `--o
 | Option | Default | Meaning |
 |---|---|---|
 | `run_dir` | none: opens the launcher | MATSim output folder |
-| `--world` | | build the 3D world you can fly through instead of the map |
+| `--world` | | build the 3D world you can explore instead of the map |
 | `--out` | `<run-dir>/agents_3d.html` (`agents_world.html` with `--world`) | HTML file to write |
 | `--sample` | `0.1` | share of agents to show (stable hash of the person id) |
 | `--title` | from the folder name | scenario name on the page |
@@ -113,10 +113,9 @@ In the launcher, pick **3D world** under **View**. The same run data goes into t
 - **Agents**: each mode gets a vehicle. Cars, car passengers and anything else on the road are cars, and trucks are trucks. Bikes and scooters are cyclists, and walks are walkers. A transit vehicle is drawn once for all its sampled riders: a bus, a 3-car tram, a 4-car train or a boat, depending on the route's `transportMode`. Riders stand at the stop until their vehicle comes. Cars keep to the right of the road. Colours are everyday colours, or **By mode**. Coloured dots mark agents too far away to see.
 - **Sun**: follows the simulation clock, from sunrise at 6:00 to sunset at 20:00, with a dusk sky and a night sky. **Midday** keeps it at noon.
 - **Camera**:
-  - drag to move, right-drag (or Ctrl/Alt/Shift-drag) to turn, scroll to zoom towards the cursor; `W A S D` move, `Q E` turn
-  - `F` fly freely: click to capture the mouse, `W A S D` move, `Q E` down / up, `Shift` faster
+  - like the map page: drag to move, right-drag (or Ctrl/Alt/Shift-drag) to turn and tilt, scroll to zoom towards the cursor
   - **click** a vehicle or walker to ride along: chase camera, or `V` for the view on board. `R` rides along with someone near the centre of the view. A transit ride stays on the vehicle while sampled riders are aboard.
-  - `Esc` stops riding or flying, `H` hides the panels, `M` turns the dots off
+  - `Esc` stops riding, `H` hides the panels, `M` turns the dots off
 - **Speed**: 1×, 10× (default), 1, 5 or 15 simulated minutes per second.
 - **Limits**: bridges get a flat deck at the height of their highest bank, with short ramps, and vehicles drive on it; real bridge heights (high viaducts) are not in the map data. Agents in tunnels move under the ground. Up close, land cover (grass, gardens, banks) is a painted texture and looks a little soft next to the crisp roads, paths and water. Bike-sharing stations are shown on the map page only. It needs a recent browser with WebGL 2 and module workers (Chrome, Edge, Safari 17+, Firefox).
 
