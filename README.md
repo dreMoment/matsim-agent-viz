@@ -107,7 +107,7 @@ Any mode name works. Common ones (car, pt, bike, walk, and a few from the Swiss 
 uv run matsim_agent_viz.py path/to/simulation_output --world
 ```
 
-In the launcher, pick **3D world** under **View**. The same run data goes into the page, plus which transit vehicle each sampled rider was on. The page is written to `agents_world.html` and does not replace the map page.
+In the launcher, turn on the **3D world (Experimental)** toggle. The same run data goes into the page, plus which transit vehicle each sampled rider was on. The page is written to `agents_world.html` and does not replace the map page.
 
 - **World**: built in your browser from OpenStreetMap vector tiles (OpenFreeMap) and terrain (Mapterhorn), so it works for any region with no extra download step. The style is flat-shaded low poly: faceted terrain and water, buildings with windows and pitched or flat roofs, roads with kerbs and lane markings, rails with sleepers, bridges with railings, footpaths, and trees in forests, parks and gardens. Further out there are buildings only, and to the horizon there is terrain painted with land cover. Tiles load as you move and the browser caches them. Only tile addresses go out, no run data.
 - **Agents**: each mode gets a vehicle. Cars, car passengers and anything else on the road are cars, and trucks are trucks. Bikes and scooters are cyclists, and walks are walkers. A transit vehicle is drawn once for all its sampled riders: a bus, a 3-car tram, a 4-car train or a boat, depending on the route's `transportMode`. Riders stand at the stop until their vehicle comes. Cars keep to the right of the road. Colours are everyday colours, or **By mode**. Coloured dots mark agents too far away to see.

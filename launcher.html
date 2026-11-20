@@ -40,6 +40,18 @@
   .seg { display: inline-flex; background: #efefed; border-radius: 8px; padding: 2px; }
   .seg button { border: 0; background: transparent; padding: 5px 12px; color: var(--muted); border-radius: 6px; }
   .seg button.on { background: #fff; color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+  .toggle { display: flex; align-items: center; gap: 10px; margin-top: 18px; cursor: pointer; user-select: none; }
+  .toggle input { position: absolute; opacity: 0; pointer-events: none; }
+  .toggle .sw { position: relative; flex: none; width: 30px; height: 18px; border-radius: 9px; background: #d9dbdf; transition: background .15s; }
+  .toggle .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff;
+    box-shadow: 0 1px 2px rgba(0,0,0,.2); transition: transform .15s; }
+  .toggle input:checked + .sw { background: var(--ink); }
+  .toggle input:checked + .sw::after { transform: translateX(12px); }
+  .toggle input:focus-visible + .sw { outline: 2px solid #c9ccd2; outline-offset: 2px; }
+  .toggle input:disabled ~ * { opacity: .45; }
+  .toggle .tl { font-weight: 600; }
+  .badge { font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--bad);
+    background: #fdf0e8; border-radius: 4px; padding: 1px 5px; margin-left: 6px; vertical-align: 1px; }
   .hint { font-size: 11.5px; color: var(--muted); margin-top: 5px; }
   .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
   .actions { display: flex; gap: 8px; align-items: center; margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--line); }
@@ -79,10 +91,11 @@
   <label class="h">Input files</label>
   <div class="files" id="files"><div class="empty">No folder chosen yet.</div></div>
 
-  <label class="h">View</label>
-  <div class="seg" id="kind">
-    <button data-v="map" class="on">Map</button><button data-v="world">3D world</button>
-  </div>
+  <label class="toggle">
+    <input type="checkbox" id="world">
+    <span class="sw"></span>
+    <span class="tl">3D world<span class="badge">Experimental</span></span>
+  </label>
   <div class="hint" id="kindHint"></div>
 
   <label class="h">Agents to show</label>
@@ -126,8 +139,8 @@ let files = {};          // role -> chosen path (or null)
 let sample = 0.1;
 let kind = "map";        // "map": agents as dots on a map; "world": a 3D world to fly through, with vehicles
 const KIND_HINT = {
-  map: "Agents as dots over a tilted map with terrain and buildings.",
-  world: "A 3D world to fly through: vehicles, walkers, buildings and trees. Click a vehicle to follow it.",
+  map: "Off: agents as dots over a tilted map with terrain and buildings.",
+  world: "On: a 3D world to explore: vehicles, walkers, buildings and trees. Click a vehicle to follow it.",
 };
 let running = false;     // a build is in progress: inputs are locked
 let stopped = false;     // the local server is gone
@@ -211,7 +224,7 @@ function showEmpty(text) {
 
 function setKind(v) {
   kind = v === "world" ? "world" : "map";
-  $("kind").querySelectorAll("button").forEach(x => x.classList.toggle("on", x.dataset.v === kind));
+  $("world").checked = kind === "world";
   $("kindHint").textContent = KIND_HINT[kind];
   update();
 }
@@ -306,7 +319,7 @@ function update() {
     const when = new Date(ex.mtime * 1000).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
     $("openExisting").textContent = `Open last page (${when}, ${mb(ex.size)})`;
   }
-  document.querySelectorAll("#dir, #pickDir, #title, #crs, #sample button, #kind button, #files button")
+  document.querySelectorAll("#dir, #pickDir, #title, #crs, #sample button, #world, #files button")
     .forEach(el => el.disabled = locked);
   $("quit").disabled = stopped;
 }
@@ -330,7 +343,7 @@ $("dir").addEventListener("input", () => { checkSeq++; showEmpty("Press Enter to
 $("dir").addEventListener("change", e => check(e.target.value));
 $("dir").addEventListener("keydown", e => { if (e.key === "Enter") check(e.target.value); });
 $("sample").querySelectorAll("button").forEach(b => b.onclick = () => { setSample(+b.dataset.v); save(); });
-$("kind").querySelectorAll("button").forEach(b => b.onclick = () => { setKind(b.dataset.v); save(); });
+$("world").onchange = e => { setKind(e.target.checked ? "world" : "map"); save(); };
 $("title").addEventListener("input", save);
 $("crs").addEventListener("input", save);
 
