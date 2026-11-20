@@ -32,3 +32,8 @@ If they match, the browser built the same legs.
 
 All three build the same 113,936 legs (same checksum). Memory peaks at about 300 MB for both Python and Node.
 At this rate, a 49 M-event run would take about 30 s in Chrome, against about 2.5 minutes in Python.
+
+## Result on a real run
+
+A full Zurich 10% run (49.4 M events, 97,000 network links), sample 0.1: Chrome read it in 38 s (1.31 M events/s),
+against about 2.5 minutes in Python. Both built the same legs (same summary and checksum). The tab did not run out of memory.
