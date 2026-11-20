@@ -1506,7 +1506,7 @@ function updateCamera(dt) {
       // Snap onto the agent for two frames after a ride starts or the clock jumps: the frame the agent is
       // first placed, and the next one, so the speed estimate starts from a placed position.
       if (!follow.ok) sm.snap = 2;
-      if (sm.snap > 0 || !(t >= sm.t)) { Object.assign(sm, { x: a.x, y: a.y, z: a.z, vx: NaN, vz: NaN, px: a.x, pz: a.z, at: a.t, t }); sm.snap--; }
+      if (sm.snap > 0 || !(t >= sm.t)) { Object.assign(sm, { x: a.x, y: a.y, z: a.z, vx: NaN, vz: NaN, px: a.x, pz: a.z, at: a.t, t }); if (sm.snap > 0) sm.snap--; }
       else {
         const kv = Math.min(1, dt * 10), kp = Math.min(1, dt * 6);
         if (a.t > sm.at) {  // a new position of the agent: update the speed estimate
@@ -1518,8 +1518,9 @@ function updateCamera(dt) {
         const dS = t - sm.t; sm.t = t;
         if (isFinite(sm.vx)) { sm.x += sm.vx * dS; sm.z += sm.vz * dS; }
         // the agent now: its route position, centred and kept to its side as place() does
-        const fl = legs[follow.li], s = sAt(fl, t), f = pointAt(fl, s + M.len / 2), b = pointAt(fl, s - M.len / 2);
-        let cx = (f.x + b.x) / 2, cz = (f.z + b.z) / 2, ux = f.x - b.x, uz = f.z - b.z, ul = Math.hypot(ux, uz);
+        const fl = legs[follow.li], s = sAt(fl, t), f = pointAt(fl, s + M.len / 2), fx = f.x, fz = f.z;  // pointAt reuses its result
+        const b = pointAt(fl, s - M.len / 2);
+        let cx = (fx + b.x) / 2, cz = (fz + b.z) / 2, ux = fx - b.x, uz = fz - b.z, ul = Math.hypot(ux, uz);
         if (ul < M.len * 0.3) { const m = pointAt(fl, s); cx = m.x; cz = m.z; ux = m.dx; uz = m.dz; ul = Math.hypot(ux, uz) || 1; }
         const ex = cx - uz / ul * M.side, ez = cz + ux / ul * M.side, ey = a.y;
         sm.x += (ex - sm.x) * kp; sm.z += (ez - sm.z) * kp; sm.y += (ey - sm.y) * Math.min(1, dt * 3);
