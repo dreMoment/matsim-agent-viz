@@ -1395,10 +1395,10 @@ const groundAt = (x, z, fallback) => { const h = heightAt(x, z); return isFinite
 
 function setMode(m) {
   if (m === camMode) return;
-  if (m === 'orbit' && camMode === 'follow') {
-    // back to the map view, above where the ride ended (if the ride never showed anyone, stay put)
+  if (m === 'orbit' && camMode === 'follow' && follow.ok) {
+    // back to the map view, above where the ride ended (a ride that never showed anyone leaves the view as it was)
     const a = follow.at;
-    if (follow.ok) orbit.target.set(a.x, a.y, a.z);
+    orbit.target.set(a.x, a.y, a.z);
     Object.assign(orbit, { dist: 450, yaw: isFinite(follow.yaw) ? follow.yaw : orbit.yaw, pitch: MAP_PITCH });
   }
   if (camMode === 'follow' && m !== 'follow') { follow.li = -1; $('follow').hidden = true; }
@@ -1535,9 +1535,9 @@ canvas.addEventListener('wheel', e => {
   const f = Math.exp(Math.max(-60, Math.min(60, e.deltaY)) * 0.0022);
   if (camMode === 'orbit') {
     const nd = Math.max(6, Math.min(30000, orbit.dist * f)), h = groundHit(e.clientX, e.clientY, orbit.target.y);
-    // zoom around the point under the cursor, but not near the horizon: there the flat-ground hit is far
-    // away (and behind any hill), so one step would throw the view kilometres
-    if (h && Math.hypot(h.x - orbit.target.x, h.z - orbit.target.z) < 2 * orbit.dist) { const k = 1 - nd / orbit.dist; orbit.target.x += (h.x - orbit.target.x) * k; orbit.target.z += (h.z - orbit.target.z) * k; }
+    // zoom around the point under the cursor, but pull far hits (near the horizon, or behind a hill) in to
+    // 2 view distances, so one step can't throw the view kilometres
+    if (h) { const k = (1 - nd / orbit.dist) * Math.min(1, 2 * orbit.dist / (Math.hypot(h.x - orbit.target.x, h.z - orbit.target.z) || 1)); orbit.target.x += (h.x - orbit.target.x) * k; orbit.target.z += (h.z - orbit.target.z) * k; }
     orbit.dist = nd;
   } else if (camMode === 'follow') follow.dist = Math.max(3, Math.min(800, follow.dist * f));
 }, { passive: false });
