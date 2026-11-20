@@ -21,7 +21,12 @@ ap.add_argument("run_dir", type=Path)
 ap.add_argument("--sample", type=float, default=0.1)
 args = ap.parse_args()
 m.progress = lambda *a, **k: None  # keep the console to the summary
+if not args.run_dir.is_dir():
+    sys.exit(f"{args.run_dir} is not a folder. Pass the run's output folder.")
 files = m.find_inputs(args.run_dir)
+for role in ("events", "network"):
+    if files.get(role) is None:
+        sys.exit(f"no output_{role}.xml(.gz) in {args.run_dir}.")
 
 t0 = time.time()
 link_from, link_mid, _, _ = m.read_network(files["network"])
