@@ -1728,11 +1728,12 @@ const span = slider.max - slider.min;
   $('hours').innerHTML = hours;
 }
 slider.oninput = () => { t = +slider.value; };
+const escHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));  // mode names come from the run
 const modesEl = $('modes');
 for (const i of modes.map((_, i) => i).sort((a, b) => modes[b].count - modes[a].count)) {
   const md = modes[i], row = md.row = document.createElement('button');
   row.className = 'mode';
-  row.innerHTML = `<span class="sw" style="background:${md.colour}"></span><span class="name">${md.name}</span><span class="count">${md.count.toLocaleString()}</span>`;
+  row.innerHTML = `<span class="sw" style="background:${md.colour}"></span><span class="name">${escHtml(md.name)}</span><span class="count">${md.count.toLocaleString()}</span>`;
   row.onclick = () => { md.shown = !md.shown; row.classList.toggle('off', !md.shown); };
   modesEl.appendChild(row);
 }

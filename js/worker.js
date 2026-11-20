@@ -1,12 +1,13 @@
 // Runs the build in the background, so the page stays responsive. The run's files are read here, on this
 // computer; only OpenStreetMap tile bounds go out (to Overpass), and coordinate-system codes the tool does
-// not know (to epsg.io).
+// not know (to epsg.io). index.html starts this module from a blob: URL, so the worker keeps the page's
+// Content-Security-Policy (a worker loaded from its own URL would need a CSP header, which GitHub Pages can't send).
 import proj4 from "../vendor/proj4.mjs";
-import { build, renderPage, BuildError } from "./engine.js";
+import { build, renderParts, BuildError } from "./engine.js";
 
 // OpenStreetMap tiles (public data) stay in the browser's cache storage, so the next build needs no download.
 const CACHE = "matsim-agent-viz-osm-v1";
-const cacheUrl = (kind, key) => new URL(`osm-cache/${kind}/${key}.json`, self.location.href).href;
+const cacheUrl = (kind, key) => new URL(`../osm-cache/${kind}/${key}.json`, import.meta.url).href;
 const cache = {
   async get(kind, key) {
     const r = await (await caches.open(CACHE)).match(cacheUrl(kind, key));
@@ -35,9 +36,13 @@ onmessage = async ({ data: { files, entries, opt } }) => {
   try {
     const { payload, meta, stats } = await build(files, opt, env, entries);
     const template = await (await fetch(new URL(opt.world ? "../world.html" : "../page.html", import.meta.url))).text();
-    postMessage({ done: { html: renderPage(template, payload, meta), title: meta.title, stats } });
+    const page = new Blob(renderParts(template, payload, meta), { type: "text/html" });
+    postMessage({ done: { page, title: meta.title, stats } });
   } catch (e) {
-    postMessage({ error: e instanceof BuildError ? e.message : `${e.name || "Error"}: ${e.message || e}` });
+    const tooBig = e instanceof RangeError && /string length|allocation/i.test(e.message);
+    postMessage({ error: e instanceof BuildError ? e.message
+      : tooBig ? "the page would be too large for the browser. Choose a smaller share of agents."
+      : `${e.name || "Error"}: ${e.message || e}` });
     if (!(e instanceof BuildError)) console.error(e);
   }
 };

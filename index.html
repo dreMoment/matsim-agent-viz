@@ -189,11 +189,11 @@
     <span class="name" id="viewName"></span>
     <button id="save">Save page</button>
   </div>
-  <iframe id="frame" title="The built page" allow="fullscreen"></iframe>
+  <iframe id="frame" title="The built page"></iframe>
 </div>
 
 <script type="module">
-import { INPUTS, findInputs, sharingFor, readConfig, scenarioName } from "./js/engine.js";
+import { INPUTS, findInputs, sharingFor, readConfig, scenarioName, renderParts } from "./js/engine.js";
 
 const $ = id => document.getElementById(id);
 const ROLE_LABEL = { events: "Events", network: "Network", schedule: "Transit schedule", config: "Config", sharing: "Sharing stations" };
@@ -207,6 +207,8 @@ let files = {};        // role -> file used (found or chosen)
 let autoSharing = null;
 let sample = 0.1, kind = "map";
 let worker = null, started = 0;
+let checking = false;  // a folder or config is being read: Build waits
+let pickSeq = 0;       // drops a folder check that a newer pick has replaced
 let page = null;       // the last built or opened page: {url, name, html size}
 
 const mb = n => n == null ? "" : n >= 1e9 ? (n / 1e9).toFixed(1) + " GB" : n >= 1e6 ? (n / 1e6).toFixed(0) + " MB" : Math.max(1, Math.round(n / 1e3)) + " kB";
@@ -219,13 +221,19 @@ const store = {
 };
 
 // ---- reading the chosen folder: its files and those one level below (not ITERS, which holds every iteration)
+const skipErrors = async (fn, fallback) => { try { return await fn(); } catch { return fallback; } };  // an unreadable file or folder is left out
 async function fromHandle(dir) {
   const entries = [];
   for await (const h of dir.values()) {
-    if (h.kind === "file") entries.push({ path: `${dir.name}/${h.name}`, file: await h.getFile() });
+    if (h.kind === "file") { const f = await skipErrors(() => h.getFile()); if (f) entries.push({ path: `${dir.name}/${h.name}`, file: f }); }
     else if (h.name !== "ITERS") {
-      for await (const g of h.values())
-        if (g.kind === "file") entries.push({ path: `${dir.name}/${h.name}/${g.name}`, file: await g.getFile() });
+      await skipErrors(async () => {
+        for await (const g of h.values()) {
+          if (g.kind !== "file") continue;
+          const f = await skipErrors(() => g.getFile());
+          if (f) entries.push({ path: `${dir.name}/${h.name}/${g.name}`, file: f });
+        }
+      });
     }
   }
   return { name: dir.name, entries };
@@ -249,29 +257,45 @@ const entryFile = e => new Promise((resolve, reject) => e.file(resolve, reject))
 async function fromDrop(dir) {
   const entries = [];
   for (const e of await readEntries(dir)) {
-    if (e.isFile) entries.push({ path: `${dir.name}/${e.name}`, file: await entryFile(e) });
+    if (e.isFile) { const f = await skipErrors(() => entryFile(e)); if (f) entries.push({ path: `${dir.name}/${e.name}`, file: f }); }
     else if (e.isDirectory && e.name !== "ITERS") {
-      for (const g of await readEntries(e)) if (g.isFile) entries.push({ path: `${dir.name}/${e.name}/${g.name}`, file: await entryFile(g) });
+      for (const g of await skipErrors(() => readEntries(e), [])) {
+        const f = g.isFile && await skipErrors(() => entryFile(g));
+        if (f) entries.push({ path: `${dir.name}/${e.name}/${g.name}`, file: f });
+      }
     }
   }
   return { name: dir.name, entries };
 }
 
-async function useFolder(f) {
+// Reads a folder with read(): the picker, the file input or a drop. Errors show on the page.
+async function openFolder(read) {
+  const seq = ++pickSeq;
+  folder = null; files = {}; found = {};
   $("error").textContent = ""; $("log").textContent = "";
-  if (!f.entries.length) { $("error").textContent = "That folder is empty."; return; }
-  folder = f;
-  $("dropText").innerHTML = `<span class="folder">${esc(f.name)}</span> · drop another folder to switch`;
-  $("files").innerHTML = '<div class="file"><span></span><span class="what">Checking the folder…</span></div>';
-  found = await findInputs(f.entries);
-  if (folder !== f) return;
-  files = { ...found };
-  autoSharing = found.sharing;
-  $("title").value = ""; $("crs").value = "";
-  $("title").placeholder = scenarioName(f.name);
-  renderFiles();
-  await refreshFromConfig();
-  if (!files.events && !files.network) $("error").textContent = "No MATSim output files in this folder. Choose the run's output folder (the one with output_events.xml.gz).";
+  $("files").innerHTML = '<div class="file"><span></span><span class="what">Reading the folder…</span></div>';
+  checking = true; update();
+  try {
+    const f = await read();
+    if (seq !== pickSeq) return;
+    if (!f.entries.length) throw new Error("That folder is empty, or its files can't be read.");
+    const res = await findInputs(f.entries);
+    if (seq !== pickSeq) return;
+    folder = f; found = res; files = { ...res };
+    autoSharing = res.sharing;
+    $("dropText").innerHTML = `<span class="folder">${esc(f.name)}</span> · drop another folder to switch`;
+    $("title").value = ""; $("crs").value = "";
+    $("title").placeholder = scenarioName(f.name);
+    renderFiles();
+    await refreshFromConfig();
+    if (!files.events && !files.network) $("error").textContent = "No MATSim output files in this folder. Choose the run's output folder (the one with output_events.xml.gz).";
+  } catch (e) {
+    if (seq !== pickSeq) return;
+    $("files").innerHTML = "";
+    $("error").textContent = e.message || "That folder can't be read.";
+  } finally {
+    if (seq === pickSeq) { checking = false; update(); }
+  }
 }
 
 // The coordinate-system hint and the sharing station file follow whichever config file is used.
@@ -315,7 +339,7 @@ function chooseFile(role) {
     if (!f || worker) return;
     files[role] = f;
     renderFiles();
-    if (role === "config") await refreshFromConfig();
+    if (role === "config") { checking = true; update(); try { await refreshFromConfig(); } finally { checking = false; update(); } }
   };
   input.click();
 }
@@ -323,7 +347,7 @@ function chooseFile(role) {
 function update() {
   const running = !!worker;
   const ready = folder && Object.entries(INPUTS).every(([r, f]) => !f.required || files[r]);
-  $("build").disabled = !ready || running;
+  $("build").disabled = !ready || running || checking;
   $("build").innerHTML = running ? '<span class="spin"></span>Building…' : "Build and open";
   $("cancel").hidden = !running;
   $("openLast").hidden = !page || running;
@@ -351,7 +375,7 @@ function timeLeft(s) {
 function showProgress(p) {
   $("progress").hidden = !worker;
   if (!worker) return;
-  if (!p) { $("pstep").textContent = "Starting…"; $("pleft").textContent = ""; $("fill").style.width = "0"; return; }
+  if (!p) { $("pstep").textContent = "Starting…"; $("pleft").textContent = ""; $("fill").classList.remove("busy"); $("fill").style.width = "0"; return; }
   const reading = !!p.reading;
   $("fill").classList.toggle("busy", !reading);
   if (reading) {
@@ -374,12 +398,16 @@ function stopWorker() {
 }
 
 $("build").onclick = () => {
-  if (!folder || worker) return;
+  if (!folder || worker || checking) return;
   $("error").textContent = ""; $("log").textContent = "";
   const osm = $("osm").checked;
   const opt = { sample, world: kind === "world", rail: osm, walk: osm, passengers: true,
                 title: $("title").value.trim(), crs: $("crs").value.trim(), folder: folder.name };
-  worker = new Worker(new URL("./js/worker.js", import.meta.url), { type: "module" });
+  // Started from a blob: URL so the worker keeps this page's Content-Security-Policy. A worker loaded from its
+  // own URL would only follow a CSP header, which GitHub Pages can't send.
+  const shim = URL.createObjectURL(new Blob([`import ${JSON.stringify(new URL("./js/worker.js", import.meta.url).href)};`], { type: "text/javascript" }));
+  worker = new Worker(shim, { type: "module" });
+  setTimeout(() => URL.revokeObjectURL(shim), 10_000);
   started = performance.now();
   update(); showProgress(null);
   const log = [];
@@ -389,7 +417,7 @@ $("build").onclick = () => {
     const secs = ((performance.now() - started) / 1000).toFixed(0);
     stopWorker();
     if (data.error) { $("error").textContent = data.error; return; }
-    const blob = new Blob([data.done.html], { type: "text/html" });
+    const blob = data.done.page;
     log.push(`built in ${secs} s, page ${mb(blob.size)}`);
     $("log").textContent = log.join("\n");
     setPage(blob, data.done.title + (opt.world ? " · 3D world" : ""), `${slug(data.done.title)}${opt.world ? "_world" : ""}.html`);
@@ -408,17 +436,24 @@ function setPage(blob, name, filename) {
   page = { url: URL.createObjectURL(blob), name, filename, size: blob.size };
   update();
 }
+// A new iframe each time, so showing a page adds no browser history. It only ever shows pages made from this
+// site's own templates (a saved page is re-rendered from its data, see openSaved).
+function newFrame(url) {
+  const fr = document.createElement("iframe");
+  fr.id = "frame"; fr.title = "The built page";
+  if (url) { fr.src = url; fr.addEventListener("load", () => fr.focus(), { once: true }); }  // keys work without a click first
+  $("frame").replaceWith(fr);
+}
 function openViewer() {
   $("viewName").textContent = page.name;
-  $("frame").src = page.url;
+  newFrame(page.url);
   $("viewer").hidden = false;
   document.title = `${page.name} · MATSim`;
   if (!history.state?.viewer) history.pushState({ viewer: true }, "");
-  $("frame").focus();
 }
 function closeViewer() {
   $("viewer").hidden = true;
-  $("frame").src = "about:blank";  // stops the animation and frees the GPU
+  newFrame(null);  // stops the animation and frees the GPU
   document.title = "MATSim agent viz";
 }
 $("close").onclick = () => (history.state?.viewer ? history.back() : closeViewer());
@@ -430,33 +465,54 @@ $("save").onclick = () => {
 };
 $("openLast").onclick = () => page && openViewer();
 $("openSaved").onclick = () => { $("pageInput").value = ""; $("pageInput").click(); };
-$("pageInput").onchange = () => {
-  const f = $("pageInput").files[0];
-  if (!f) return;
-  setPage(new Blob([f], { type: "text/html" }), f.name.replace(/\.html?$/i, ""), f.name);
-  openViewer();
-};
+$("pageInput").onchange = () => { const f = $("pageInput").files[0]; if (f) openSaved(f); };
+
+// A saved page may come from anyone, so its own HTML and scripts never run here. Only its data (parsed as JSON)
+// and its texts are taken, and the page is rendered again from this site's template.
+async function openSaved(file) {
+  $("error").textContent = "";
+  try {
+    const text = await file.text();
+    const world = text.includes("<script>window.DATA = ");
+    const marker = world ? "<script>window.DATA = " : "const DATA = ";
+    const start = text.indexOf(marker);
+    if (start < 0) throw new Error();
+    const line = text.slice(start + marker.length, text.indexOf("\n", start));  // the data is one line of JSON
+    const payload = JSON.parse(line.replace(/;\s*(<\/script>)?\s*$/, ""));
+    if (!Array.isArray(payload.modes) || !Array.isArray(payload.legs)) throw new Error();
+    const doc = new DOMParser().parseFromString(text, "text/html");  // inert: nothing in it runs
+    const title = doc.title.replace(/ · MATSim( world)?$/, "") || file.name.replace(/\.html?$/i, "");
+    const eyebrow = doc.querySelector(".eyebrow")?.textContent.trim() || `${title} · last iteration`;
+    const note = (/(\S[^·\n]*?) · click a mode to hide it/.exec(doc.body.textContent) ?? [])[1] ?? "";
+    const template = await (await fetch(world ? "world.html" : "page.html")).text();
+    setPage(new Blob(renderParts(template, payload, { title, eyebrow, note }), { type: "text/html" }),
+      title + (world ? " · 3D world" : ""), file.name);
+    openViewer();
+  } catch {
+    $("error").textContent = `${file.name} is not a page saved by this tool.`;
+  }
+}
 
 // ---- choosing the folder: the folder picker where the browser has one, else the file input; or drag and drop
 $("pickDir").onclick = async () => {
   if (window.showDirectoryPicker) {
     let dir;
     try { dir = await window.showDirectoryPicker({ id: "matsim-run", mode: "read" }); } catch { return; }  // cancelled
-    useFolder(await fromHandle(dir));
+    openFolder(() => fromHandle(dir));
   } else { $("dirInput").value = ""; $("dirInput").click(); }
 };
-$("dirInput").onchange = () => { if ($("dirInput").files.length) useFolder(fromInput($("dirInput").files)); };
+$("dirInput").onchange = () => { const list = $("dirInput").files; if (list.length) openFolder(async () => fromInput(list)); };
 if (!window.showDirectoryPicker)
   $("pickHint").textContent = "Your browser may ask whether to “upload” the files. They are only read here, in this tab.";
 const drop = $("drop");
 ["dragenter", "dragover"].forEach(t => document.addEventListener(t, e => { e.preventDefault(); if (!worker) drop.classList.add("over"); }));
-["dragleave", "drop"].forEach(t => document.addEventListener(t, e => { e.preventDefault(); if (t === "drop" || e.target === document.documentElement) drop.classList.remove("over"); }));
+["dragleave", "drop"].forEach(t => document.addEventListener(t, e => { e.preventDefault(); if (t === "drop" || !e.relatedTarget) drop.classList.remove("over"); }));
 document.addEventListener("drop", async e => {
   if (worker) return;
   const entry = [...e.dataTransfer.items].map(i => i.webkitGetAsEntry?.()).find(Boolean);
   if (!entry) return;
-  if (entry.isDirectory) useFolder(await fromDrop(entry));
-  else if (/\.html?$/i.test(entry.name)) { const f = await entryFile(entry); setPage(new Blob([f], { type: "text/html" }), f.name.replace(/\.html?$/i, ""), f.name); openViewer(); }
+  if (entry.isDirectory) openFolder(() => fromDrop(entry));
+  else if (/\.html?$/i.test(entry.name)) openSaved(await entryFile(entry));
   else $("error").textContent = "Drop the run's output folder, not a single file.";
 });
 

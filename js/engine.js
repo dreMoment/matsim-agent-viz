@@ -136,20 +136,33 @@ const ENT = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'" };
 const unescapeXml = s => s.replace(/&(#x[0-9a-fA-F]+|#\d+|\w+);/g, (m, e) =>
   e[0] === "#" ? String.fromCodePoint(e[1] === "x" ? parseInt(e.slice(2), 16) : +e.slice(1)) : (ENT[e] ?? m));
 
-function attrs(s, i, end) {
-  const out = {};
+/** The attributes of the tag whose name ends at i, and the index of the tag's closing ">":
+ * [attrs, end], or null if the tag is not complete in s yet. Quoted values may hold ">". */
+function attrs(s, i) {
+  const out = {}, n = s.length;
   for (;;) {
+    while (i < n && s.charCodeAt(i) <= 32) i++;
+    if (i >= n) return null;
+    const c = s.charCodeAt(i);
+    if (c === 62) return [out, i];             // ">"
+    if (c === 47) { i++; continue; }          // "/" of "/>"
     const eq = s.indexOf("=", i);
-    if (eq < 0 || eq > end) return out;
-    let a = i;
-    while (s.charCodeAt(a) <= 32) a++;
+    if (eq < 0) return null;
+    const name = s.slice(i, eq), bad = name.indexOf(">");
+    if (bad >= 0) return [out, i + bad];     // an attribute without a value: skip it
     let q = eq + 1;
-    while (s.charCodeAt(q) <= 32) q++;
+    while (q < n && s.charCodeAt(q) <= 32) q++;
+    if (q >= n) return null;
     const quote = s[q];
+    if (quote !== '"' && quote !== "'") {    // not well-formed: give up on this tag
+      const gt = s.indexOf(">", q);
+      return gt < 0 ? null : [out, gt];
+    }
     const close = s.indexOf(quote, q + 1);
+    if (close < 0) return null;
     let v = s.slice(q + 1, close);
     if (v.indexOf("&") >= 0) v = unescapeXml(v);
-    out[s.slice(a, eq).trimEnd()] = v;
+    out[name.trimEnd()] = v;
     i = close + 1;
   }
 }
@@ -161,38 +174,48 @@ function attrs(s, i, end) {
  */
 async function scan(file, names, onTag, { withText = false, onBytes } = {}) {
   const reader = (await textStream(file, onBytes)).getReader();
-  let rest = "";
+  let rest = "", root = null, closed = false;
   try {
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
-      const text = rest + value;
+      const text = rest + value, n = text.length;
       let pos = 0;
       for (;;) {
         const lt = text.indexOf("<", pos);
-        if (lt < 0) { pos = text.length; break; }
+        if (lt < 0) { pos = n; break; }
         if (text.startsWith("<!--", lt)) {  // a comment may hold anything
           const end = text.indexOf("-->", lt + 4);
           if (end < 0) { pos = lt; break; }
           pos = end + 3;
           continue;
         }
-        const gt = text.indexOf(">", lt);
-        if (gt < 0) { pos = lt; break; }
         let e = lt + 1;
-        for (;;) {
+        if (text.charCodeAt(e) === 47) e++;  // an end tag: its name starts after "/"
+        for (; e < n; e++) {
           const c = text.charCodeAt(e);
           if (c === 32 || c === 9 || c === 10 || c === 13 || c === 47 || c === 62) break;
-          e++;
         }
+        if (e >= n) { pos = lt; break; }
         const name = text.slice(lt + 1, e);
         if (names.has(name)) {
+          const r = attrs(text, e);
+          if (!r) { pos = lt; break; }  // the tag goes on in the next chunk
+          const gt = r[1];
           if (withText) {  // wait until the text after the tag is all here
             const nx = text.indexOf("<", gt);
             if (nx < 0) { pos = lt; break; }
-            onTag(name, attrs(text, e, gt), unescapeXml(text.slice(gt + 1, nx)));
-          } else onTag(name, attrs(text, e, gt));
+            onTag(name, r[0], unescapeXml(text.slice(gt + 1, nx)));
+          } else onTag(name, r[0]);
+          pos = gt + 1;
+          continue;
         }
+        if (root === null) { if (name[0] !== "?" && name[0] !== "!") root = name; }
+        else if (name.length === root.length + 1 && name === "/" + root) closed = true;
+        // Another tag: skip it. A ">" inside one of its values ends it early, but values hold no "<",
+        // so the next "<" is still the next tag.
+        const gt = text.indexOf(">", e);
+        if (gt < 0) { pos = lt; break; }
         pos = gt + 1;
       }
       rest = text.slice(pos);
@@ -201,6 +224,7 @@ async function scan(file, names, onTag, { withText = false, onBytes } = {}) {
     if (err instanceof BuildError) throw err;
     fail(`${file.name} could not be read${err.message ? ` (${err.message})` : ""}. Is the file complete, or was the copy cut off?`);
   }
+  if (!closed) fail(`${file.name} ends too early${root ? ` (no closing </${root}>)` : ""}. Is the file complete, or was the copy cut off?`);
 }
 
 /** A small XML tree (tags, attributes, children; no text), for config files. */
@@ -219,10 +243,13 @@ function parseTree(text) {
     if (c === "?" || c === "!") continue;
     if (c === "/") { if (stack.length > 1) stack.pop(); continue; }
     let e = lt + 1;
-    while (!/[\s/>]/.test(text[e])) e++;
-    const el = { tag: text.slice(lt + 1, e), attrs: attrs(text, e, gt), children: [] };
+    while (e < text.length && !/[\s/>]/.test(text[e])) e++;
+    const r = attrs(text, e);
+    if (!r) break;
+    pos = r[1] + 1;
+    const el = { tag: text.slice(lt + 1, e), attrs: r[0], children: [] };
     stack[stack.length - 1].children.push(el);
-    if (text[gt - 1] !== "/") stack.push(el);
+    if (text[r[1] - 1] !== "/") stack.push(el);
   }
   return root;
 }
@@ -279,11 +306,11 @@ const KNOWN_CRS = {
   "EPSG:26917": "+proj=utm +zone=17 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs",
   "EPSG:2154": "+proj=lcc +lat_0=46.5 +lon_0=3 +lat_1=49 +lat_2=44 +x_0=700000 +y_0=6600000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs",
   "EPSG:27700": "+proj=tmerc +lat_0=49 +lon_0=-2 +k=0.9996012717 +x_0=400000 +y_0=-100000 +ellps=airy +towgs84=446.448,-125.157,542.06,0.15,0.247,0.842,-20.489 +units=m +no_defs",
-  "EPSG:28992": "+proj=sterea +lat_0=52.1561605555556 +lon_0=5.38763888888889 +k=0.9999079 +x_0=155000 +y_0=463000 +ellps=bessel +towgs84=565.4171,50.3319,465.5524,1.9342,-1.6677,9.1019,4.0725 +units=m +no_defs",
+  "EPSG:28992": "+proj=sterea +lat_0=52.1561605555556 +lon_0=5.38763888888889 +k=0.9999079 +x_0=155000 +y_0=463000 +ellps=bessel +towgs84=565.4171,50.3319,465.5524,-0.398957,0.343988,-1.8774,4.0725 +units=m +no_defs",
   "EPSG:3035": "+proj=laea +lat_0=52 +lon_0=10 +x_0=4321000 +y_0=3210000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs",
   "EPSG:2180": "+proj=tmerc +lat_0=0 +lon_0=19 +k=0.9993 +x_0=500000 +y_0=-5300000 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs",
   "EPSG:3006": "+proj=utm +zone=33 +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +units=m +no_defs",
-  "EPSG:5514": "+proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +towgs84=589,76,480,0,0,0,0 +units=m +no_defs",
+  "EPSG:5514": "+proj=krovak +lat_0=49.5 +lon_0=24.8333333333333 +alpha=30.2881397527778 +k=0.9999 +x_0=0 +y_0=0 +ellps=bessel +towgs84=570.8,85.7,462.8,4.998,1.587,5.261,3.56 +units=m +no_defs",
   "EPSG:4326": "+proj=longlat +datum=WGS84 +no_defs",
   "EPSG:3857": "+proj=merc +a=6378137 +b=6378137 +lat_ts=0 +lon_0=0 +x_0=0 +y_0=0 +k=1 +units=m +nadgrids=@null +wktext +no_defs",
 };
@@ -552,14 +579,18 @@ async function osmTile(kind, key, query, what, env) {
         method: "POST", body: new URLSearchParams({ data: query }),
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
       });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      if (!r.ok) {
+        const err = new Error(`HTTP ${r.status}`);
+        err.final = r.status >= 400 && r.status < 500 && r.status !== 429;  // refused, not busy: retrying won't help
+        throw err;
+      }
       raw = await r.text();
       const data = JSON.parse(raw);
       if ((data.remark ?? "").includes("error")) throw new Error(data.remark.slice(0, 200));  // incomplete data
       await env.cache?.put(kind, key, raw).catch(() => {});
       return data;
     } catch (e) {
-      if (attempt === 2) {
+      if (attempt === 2 || e.final) {
         env.say(`note: could not download ${what} (${e.message || e})`);
         return null;
       }
@@ -644,7 +675,7 @@ class RailGraph {
     for (let i = ci - r; i <= ci + r; i++) {
       for (let j = cj - r; j <= cj + r; j++) {
         for (const [a, b, k] of this.grid.get(`${i},${j}`) ?? []) {
-          const key = a * 4294967296 + b;
+          const key = a * this.x.length + b;
           if (seen.has(key) || !compatible(k, kind)) continue;
           seen.add(key);
           const ax = this.x[a], ay = this.y[a], bx = this.x[b], by = this.y[b];
@@ -667,7 +698,7 @@ class RailGraph {
     const limit = 3 * dist(start, end) + 3000;
     const [ex, ey] = end, X = this.x, Y = this.y;
     const h = n => hypot(X[n] - ex, Y[n] - ey);
-    const N = 4294967296;
+    const N = X.length;
     const sk = (n, prev) => n * N + prev;  // state: at n, came from prev
     // where the path can leave the track to reach the end stop: node -> [[towards node, px, py, extra cost]]
     const goal = new Map();
@@ -822,7 +853,7 @@ function walkGraph(tiles, crs) {
       } else if (el.type === "way") ways.set(el.id, el.nodes);
     }
   }
-  const edges = [];
+  const edges = [];  // a, b pairs, flat
   for (const refs of ways.values()) {
     const r = refs.filter(n => ids.has(n)).map(n => ids.get(n));
     for (let k = 0; k + 1 < r.length; k++) {
@@ -834,14 +865,14 @@ function walkGraph(tiles, crs) {
       for (let s = 1; s <= steps; s++) {  // extra points on long segments, evenly spaced
         const f = s / (steps + 1);
         x.push(x0 + dx * f); y.push(y0 + dy * f);
-        edges.push([u, x.length - 1]); u = x.length - 1;
+        edges.push(u, x.length - 1); u = x.length - 1;
       }
-      edges.push([u, v]);
+      edges.push(u, v);
     }
   }
   const g = new Graph(x.length);
-  for (const [a, b] of edges) {
-    const w = hypot(x[a] - x[b], y[a] - y[b]) + 1e-3;
+  for (let k = 0; k < edges.length; k += 2) {
+    const a = edges[k], b = edges[k + 1], w = hypot(x[a] - x[b], y[a] - y[b]) + 1e-3;
     g.add(a, b, w); g.add(b, a, w);
   }
   g.finish();
@@ -895,19 +926,19 @@ class Graph {
   add(a, b, w) { this.edges.push(a, b, w); }
   finish() {
     const n = this.n, e = this.edges, m = e.length / 3;
-    const best = new Map();  // a,b -> lowest weight
+    const best = new Map();  // a * n + b -> lowest weight
     for (let k = 0; k < m; k++) {
-      const key = e[3 * k] * 4294967296 + e[3 * k + 1], w = e[3 * k + 2];
+      const key = e[3 * k] * n + e[3 * k + 1], w = e[3 * k + 2];
       const old = best.get(key);
       if (old === undefined || w < old) best.set(key, w);
     }
     this.start = new Int32Array(n + 1);
-    for (const key of best.keys()) this.start[Math.floor(key / 4294967296) + 1]++;
+    for (const key of best.keys()) this.start[Math.floor(key / n) + 1]++;
     for (let i = 0; i < n; i++) this.start[i + 1] += this.start[i];
     this.to = new Int32Array(best.size); this.w = new Float64Array(best.size);
     const fill = this.start.slice(0, n);
     for (const [key, w] of best) {
-      const a = Math.floor(key / 4294967296), b = key - a * 4294967296, k = fill[a]++;
+      const a = Math.floor(key / n), b = key - a * n, k = fill[a]++;
       this.to[k] = b; this.w[k] = w;
     }
     this.edges = null;
@@ -957,7 +988,9 @@ function shortestPaths(legs, graph, X, Y, index, snapM, limit, tol, name, direct
   const tracks = new Map();
   for (const [src, group] of groups) {
     const caps = group.map(([k]) => limit(dist(legs[k].pts[0].slice(1), legs[k].pts[1].slice(1))));
-    const { dist: d, pred } = graph.dijkstra(src, Math.max(...caps), group.map(g => g[1]));
+    let cap = 0;
+    for (const c of caps) if (c > cap) cap = c;
+    const { dist: d, pred } = graph.dijkstra(src, cap, group.map(g => g[1]));
     group.forEach(([k, dst, rev], gi) => {
       if (!(d(dst) <= caps[gi])) return;
       const path = [dst];
@@ -1046,18 +1079,12 @@ export function crc32(str) {
  */
 async function buildLegs(file, sample, { linkFrom, linkMid }, stops, sharing, routeKinds, vehicleKinds, onBytes, say) {
   const threshold = Math.trunc(sample * 10000);
-  const sampledCache = new Map();
-  const sampled = p => {
-    if (p === undefined || p.startsWith("pt_")) return false;
-    let s = sampledCache.get(p);
-    if (s === undefined) { s = crc32(p) % 10000 < threshold; sampledCache.set(p, s); }
-    return s;
-  };
+  const sampled = p => p !== undefined && !p.startsWith("pt_") && crc32(p) % 10000 < threshold;
   const pos = new Map();       // person -> last known [x, y]
   const openLeg = new Map();   // person -> {mode, pts: [[t, x, y]]}
   const pending = new Map();   // person -> leg that arrived; end point may be refined by actstart
   const riders = new Map();    // vehicle -> Set of sampled persons on board
-  const legs = [], hops = new Map();
+  const legs = [], hopDefs = new Map();
   const atStation = new Map(); // person -> link of the sharing pickup/dropoff activity they are at (all persons)
   routeKinds ??= new Map(); vehicleKinds ??= new Map();
   const onTracks = new Map();  // vehicle -> 'rail' / 'tram', for transit vehicles of routes that run on tracks
@@ -1138,7 +1165,7 @@ async function buildLegs(file, sample, { linkFrom, linkMid }, stops, sharing, ro
             add(p, t, xy, true, kind !== undefined);
             if (hop && leg.pts[leg.pts.length - 1][0] === t) {
               const key = `${hop[1]}\u0000${hop[2]}\u0000${hop[3]}`;
-              hops.set(key, [hop[1], hop[2], hop[3]]);
+              hopDefs.set(key, [hop[1], hop[2], hop[3]]);
               (leg.hops ??= []).push([hop[0], leg.pts.length - 1, key]);
             }
           }
@@ -1190,6 +1217,8 @@ async function buildLegs(file, sample, { linkFrom, linkMid }, stops, sharing, ro
   }, { onBytes });
   for (const p of [...pending.keys()]) finish(p);
   if (nEvents === 0) fail(`${file.name} contains no events.`);
+  const hops = new Map();  // only those of kept legs
+  for (const leg of legs) for (const h of leg.hops ?? []) hops.set(h[2], hopDefs.get(h[2]));
   return { legs, hops, nEvents };
 }
 
@@ -1277,12 +1306,22 @@ function toPayload(legs, crs, sharing, tracks, vehicles) {
 
 const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#x27;" }[c]));
 
-/** The page: the template with the data and texts filled in. */
-export function renderPage(template, payload, { title, eyebrow, note }) {
-  const json = JSON.stringify(payload).replace(/</g, "\\u003c");  // no "</script>" inside the data
+/** The page as a list of strings (the template with the data and texts filled in), for a Blob or a file. */
+export function renderParts(template, payload, { title, eyebrow, note }) {
+  let json;
+  try {
+    json = JSON.stringify(payload);
+    if (json.includes("<")) json = json.replace(/</g, "\\u003c");  // no "</script>" inside the data
+  } catch (e) {
+    if (e instanceof RangeError) fail("the page would be too large for the browser. Choose a smaller share of agents.");
+    throw e;
+  }
   const fill = { __DATA__: json, __NOTE__: escapeHtml(note), __EYEBROW__: escapeHtml(eyebrow), __TITLE__: escapeHtml(title) };
-  return template.replace(/__DATA__|__NOTE__|__EYEBROW__|__TITLE__/g, k => fill[k]);
+  return template.split(/(__DATA__|__NOTE__|__EYEBROW__|__TITLE__)/).map(p => fill[p] ?? p);
 }
+
+/** The page as one string. */
+export const renderPage = (template, payload, meta) => renderParts(template, payload, meta).join("");
 
 // ---------------------------------------------------------------- the build
 /**
@@ -1330,7 +1369,7 @@ export async function build(files, opt, env, entries = []) {
     }
     if (crs) env.say(`note: coordinate system not set in output_config, using ${net.crs} from the network`);
   }
-  crs ??= await guessSwissCrs(net.linkMid.values(), env);
+  crs ??= await guessSwissCrs([...net.linkMid.values()], env);
 
   let sched = { stops: new Map(), kinds: new Map(), vkinds: new Map() };
   if (schedule) {

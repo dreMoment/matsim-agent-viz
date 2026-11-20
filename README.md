@@ -22,7 +22,7 @@ The website reads the run in your browser tab. The files are never uploaded: the
 
 1. Open the site in a recent Chrome, Edge, Firefox or Safari.
 2. Drop the run's output folder on the page, or click **Choose folder…**. The page lists the input files it found, and you can swap any of them with **Change…**. Firefox and Safari may ask whether to "upload" the files. They are only read in the tab.
-3. Pick the share of agents and, if you like, the **3D world**, then **Build and open**. The page opens in the same tab. **← Back** returns to the run, and **Save page** downloads the page as one HTML file you can share. To watch it again, open the site and use **Open a saved page…** (or drop the file on it). A saved map page also opens straight from disk in Chrome, but the 3D world doesn't: browsers don't run its workers from a local file. Some viewers (Quick Look, editor previews) block WebGL.
+3. Pick the share of agents and, if you like, the **3D world**, then **Build and open**. The page opens in the same tab. **← Back** returns to the run, and **Save page** downloads the page as one HTML file you can share. To watch it again, open the site and use **Open a saved page…** (or drop the file on it). The site takes only the data and texts from the file and draws them with its own template, so a page from someone else can't run code there. A saved map page also opens straight from disk in Chrome, but the 3D world doesn't: browsers don't run its workers from a local file. Some viewers (Quick Look, editor previews) block WebGL.
 
 The **Trains and walkers on OpenStreetMap paths** switch turns off the track and footpath downloads. Trains and trams then use the run's own links, and walkers move in straight lines.
 
