@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- No network access at all: the page can only load its own files. The run stays on this machine. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; worker-src 'self'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Browser parse test</title>
+<style>
+  body { font: 15px/1.5 system-ui, sans-serif; max-width: 760px; margin: 2rem auto; padding: 0 16px; color: #222; background: #fff; }
+  h1 { font-size: 1.3rem; }
+  .row { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; margin: .8rem 0; }
+  table { border-collapse: collapse; margin: .6rem 0; }
+  td, th { padding: .2rem .8rem .2rem 0; text-align: left; vertical-align: top; }
+  td.n { text-align: right; font-variant-numeric: tabular-nums; }
+  progress { width: 100%; }
+  pre { background: #f4f4f4; padding: .8rem; overflow-x: auto; font-size: 13px; }
+  .muted { color: #666; }
+</style>
+</head>
+<body>
+<h1>Can the browser read a MATSim run?</h1>
+<p class="muted">Pick the run's output folder. The files are read here, in this tab. The page is not allowed to
+connect anywhere (see the Content-Security-Policy), so nothing is uploaded. It reads the network, the transit
+schedule and the events, and builds the sampled agents' legs as <code>matsim_agent_viz.py</code> does.</p>
+
+<div class="row">
+  <label>Run folder <input id="dir" type="file" webkitdirectory></label>
+  <label>Sample <input id="sample" type="number" value="0.1" min="0.0001" max="1" step="0.01" style="width:5em"></label>
+  <button id="go" disabled>Run</button>
+</div>
+<table id="files"></table>
+<div id="status"></div>
+<progress id="bar" value="0" max="1" hidden></progress>
+<div id="result"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const ROLES = { events: /(^|\.)output_events\.xml(\.gz)?$/, network: /(^|\.)output_network\.xml(\.gz)?$/,
+                schedule: /(^|\.)output_transitSchedule\.xml(\.gz)?$/ };
+let files = {};
+const mb = n => (n / 1e6).toFixed(1) + " MB";
+
+$("dir").onchange = () => {
+  files = {};
+  for (const f of $("dir").files) {
+    if (f.webkitRelativePath.split("/").length !== 2) continue;  // only the folder itself, not subfolders
+    for (const [role, re] of Object.entries(ROLES)) if (re.test(f.name)) files[role] = f;
+  }
+  $("files").innerHTML = Object.keys(ROLES).map(r =>
+    `<tr><th>${r}</th><td>${files[r] ? files[r].name : "<i>not found</i>"}</td>` +
+    `<td class="n">${files[r] ? mb(files[r].size) : ""}</td></tr>`).join("");
+  $("go").disabled = !(files.events && files.network);
+};
+
+$("go").onclick = () => {
+  $("go").disabled = true;
+  $("result").innerHTML = "";
+  $("bar").hidden = false;
+  const started = performance.now();
+  const w = new Worker("worker.js");
+  w.onmessage = ({ data }) => {
+    if (data.progress) {
+      $("status").textContent = `Reading ${data.progress} … ${mb(data.read)} of ${mb(data.size)} ` +
+        `(${((performance.now() - started) / 1000).toFixed(0)} s)`;
+      $("bar").value = data.read / data.size;
+      return;
+    }
+    w.terminate();
+    $("go").disabled = false;
+    $("bar").hidden = true;
+    if (data.error) { $("status").textContent = "Failed"; $("result").innerHTML = `<pre>${data.error}</pre>`; return; }
+    const d = data.done, total = (performance.now() - started) / 1000;
+    $("status").textContent = `Done in ${total.toFixed(1)} s`;
+    const rate = d.nEvents / d.time.events;
+    const rows = [
+      ["Network", `${d.nNodes.toLocaleString()} nodes, ${d.nLinks.toLocaleString()} links`, d.time.network],
+      ["Schedule", `${d.nStops.toLocaleString()} stops`, d.time.schedule],
+      ["Events", `${d.nEvents.toLocaleString()} events, ${(rate / 1e6).toFixed(2)} M/s, ` +
+                 `${mb(files.events.size / d.time.events)}/s on disk`, d.time.events],
+    ];
+    $("result").innerHTML = `<table>${rows.map(([a, b, t]) =>
+      `<tr><th>${a}</th><td>${b}</td><td class="n">${t === undefined ? "–" : t.toFixed(1) + " s"}</td></tr>`).join("")}</table>
+      <p>Built <b>${d.legs.toLocaleString()}</b> legs with ${d.points.toLocaleString()} points and
+      ${d.hops.toLocaleString()} train/tram hops.</p>
+      <p class="muted">To compare with Python on the same folder:</p>
+      <pre>uv run spike/browser-parse/bench_python.py RUN_FOLDER --sample ${$("sample").value}</pre>
+      <p class="muted">Both print the same summary. If they match, the browser built the same legs.</p>
+      <pre>${JSON.stringify({ legs: d.legs, points: d.points, hops: d.hops, checksum: d.checksum, modes: d.modes })}</pre>`;
+  };
+  w.onerror = e => { $("status").textContent = "Failed: " + e.message; $("go").disabled = false; };
+  w.postMessage({ events: files.events, network: files.network, schedule: files.schedule ?? null,
+                  sample: +$("sample").value });
+};
+</script>
+</body>
+</html>
