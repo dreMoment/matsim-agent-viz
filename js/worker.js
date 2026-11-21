@@ -3,7 +3,7 @@
 // not know (to epsg.io). index.html starts this module from a blob: URL, so the worker keeps the page's
 // Content-Security-Policy (a worker loaded from its own URL would need a CSP header, which GitHub Pages can't send).
 import proj4 from "../vendor/proj4.mjs";
-import { build, renderParts, BuildError } from "./engine.js";
+import { build, renderParts, BuildError, CrsError } from "./engine.js";
 
 // OpenStreetMap tiles (public data) stay in the browser's cache storage, so the next build needs no download.
 const CACHE = "matsim-agent-viz-osm-v1";
@@ -44,7 +44,7 @@ onmessage = async ({ data: { files, entries, opt } }) => {
     const tooBig = e instanceof RangeError && /string length|allocation/i.test(e.message);
     postMessage({ error: e instanceof BuildError ? e.message
       : tooBig ? "the page would be too large for the browser. Choose a smaller share of agents."
-      : `${e.name || "Error"}: ${e.message || e}` });
+      : `${e.name || "Error"}: ${e.message || e}`, crs: e instanceof CrsError });
     if (!(e instanceof BuildError)) console.error(e);
   }
 };
