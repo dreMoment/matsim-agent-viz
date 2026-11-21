@@ -1,4 +1,4 @@
-# matsim-agent-viz
+# <img src="logo.svg" width="36" height="36" alt="" align="top"> matsim-agent-viz
 
 A minimal 3D animation of the last iteration of a MATSim run. Each agent on a leg is a dot moving over a tilted map with terrain and 3D buildings. Dots are black by default, or coloured by mode.
 

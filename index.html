@@ -16,7 +16,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MATSim agent viz</title>
 <meta name="description" content="Watch the agents of a MATSim run move over a 3D map, or explore the run in a 3D world. Your files stay in your browser.">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%277%27 fill=%27%2316181d%27/%3E%3Ccircle cx=%279%27 cy=%2221%27 r=%273.5%27 fill=%27%23fff%27/%3E%3Ccircle cx=%2716%27 cy=%2712%27 r=%273.5%27 fill=%27%23f59e0b%27/%3E%3Ccircle cx=%2724%27 cy=%2719%27 r=%273.5%27 fill=%27%233b82f6%27/%3E%3C/svg%3E">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&display=swap" rel="stylesheet">
 <style>
@@ -27,6 +27,8 @@
   main { max-width: 640px; margin: 56px auto; padding: 24px 26px 22px; background: var(--card); border: 1px solid var(--line);
     border-radius: 14px; box-shadow: 0 6px 24px rgba(0,0,0,.06); }
   @media (max-width: 680px) { main { margin: 16px; padding: 18px 16px; } }
+  .brand { display: flex; gap: 12px; align-items: center; }
+  .brand img { flex: none; }
   .eyebrow { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
   h1 { font-size: 22px; font-weight: 650; letter-spacing: -.02em; margin: 4px 0 2px; }
   .lead { color: var(--muted); margin: 0 0 6px; }
@@ -111,8 +113,11 @@
 </head>
 <body>
 <main id="app">
-  <div class="eyebrow">MATSim · 3D agents</div>
-  <h1>Visualise a run</h1>
+  <div class="brand">
+    <img src="logo.svg" width="44" height="44" alt="">
+    <div><div class="eyebrow">MATSim · 3D agents</div>
+    <h1>Visualise a run</h1></div>
+  </div>
   <p class="lead">Watch the agents of a MATSim run move over a 3D map, or explore the run in a 3D world.</p>
   <div class="private">
     <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 1a3.5 3.5 0 0 0-3.5 3.5V6H4a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V7a1 1 0 0 0-1-1h-.5V4.5A3.5 3.5 0 0 0 8 1Zm-2 5V4.5a2 2 0 1 1 4 0V6H6Z"/></svg>
