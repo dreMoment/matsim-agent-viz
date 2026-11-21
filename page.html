@@ -107,6 +107,7 @@
   .badge .key.on { display: grid; }
   .badge .key span { display: inline-flex; align-items: center; gap: 5px; }
   .badge .key i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  body.demo .panel, body.demo .badge { display: none !important; }  /* the start page's moving background */
   .maplibregl-ctrl-attrib { font-size: 10px; background: rgba(255,255,255,.6) !important; }
 </style>
 </head>
@@ -187,6 +188,9 @@
 </div>
 <script>
 const DATA = __DATA__;
+// The start page shows a fake run behind its card (DATA.demo): no controls, and the camera circles slowly.
+const DEMO = DATA.demo === true, STILL = DEMO && matchMedia('(prefers-reduced-motion: reduce)').matches;
+if (DEMO) document.body.classList.add('demo');
 const escHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));  // mode names come from the run
 
 // ---------- modes: fixed names, colours and sizes so a mode looks the same in every run.
@@ -351,7 +355,7 @@ if (sh) {
 // ---------- speed
 let stateReady = false;
 const SPEEDS = [60, 240, 900, 1800];
-let speed = 240;
+let speed = DEMO ? 90 : 240;
 const speedEl = document.getElementById('speed');
 function drawSpeed() {
   speedEl.innerHTML = SPEEDS.map((v, i) =>
@@ -374,16 +378,17 @@ function drawState() {
 }
 stateReady = true;
 addEventListener('click', e => { const b = e.target.closest('button'); if (b && e.detail) b.blur(); });
-setPlaying(true);
+setPlaying(!STILL);
 playBtn.onclick = () => setPlaying(!playing);
 
-let t = Math.max(tMin, 7 * 3600), dirty = true;
+let t = Math.max(tMin, (DEMO ? 7.5 : 7) * 3600), dirty = true;
 slider.oninput = () => { t = +slider.value; dirty = true; };
 
 const panel = document.getElementById('panel'), badge = document.getElementById('badge');
 document.getElementById('help').onclick = () => document.getElementById('keys').classList.toggle('open');
 let labelsOn = false;
 addEventListener('keydown', e => {
+  if (DEMO) return;
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing); }
   else if (e.key === 'ArrowLeft') { e.preventDefault(); t = Math.max(+slider.min, t - 300); dirty = true; }
@@ -405,9 +410,9 @@ const map = new maplibregl.Map({
   container: 'map',
   style: 'https://tiles.openfreemap.org/styles/positron',
   center: DATA.centre, zoom: 13.9, pitch: 62, bearing: -15,
-  maxPitch: 80, attributionControl: { compact: true },
+  maxPitch: 80, attributionControl: { compact: true }, interactive: !DEMO,
 });
-map.setPadding({ left: 300, top: 0, right: 0, bottom: 0 });
+map.setPadding({ left: DEMO ? 0 : 300, top: 0, right: 0, bottom: 0 });
 const DEM = { type: 'raster-dem', tiles: ['https://tiles.mapterhorn.com/{z}/{x}/{y}.webp'],
   tileSize: 512, encoding: 'terrarium', maxzoom: 14, attribution: '© Mapterhorn' };
 
@@ -584,6 +589,7 @@ const clockEls = [document.getElementById('clock'), document.getElementById('bad
 const movingEls = [document.getElementById('moving'), document.getElementById('badgeMoving')];
 let last = performance.now(), lastPush = 0;
 function frame(now) {
+  if (DEMO && !STILL) map.setBearing(map.getBearing() + (now - last) / 1000 * 1.5);  // a full circle in 4 minutes
   if (playing) { t += (now - last) / 1000 * speed; if (t > +slider.max) t = +slider.min; dirty = true; }
   last = now;
   if (dirty && now - lastPush > 50) {  // update dots ~20 times per second

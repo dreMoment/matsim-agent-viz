@@ -99,6 +99,11 @@
   .spin { display: inline-block; width: 10px; height: 10px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
     animation: r .8s linear infinite; vertical-align: -1px; margin-right: 6px; }
   @keyframes r { to { transform: rotate(360deg); } }
+  /* the start page's background: a fake run of Zurich playing, behind a light veil */
+  #backdrop { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; pointer-events: none; opacity: 0; transition: opacity 1.5s; }
+  #backdrop.on { opacity: 1; }
+  #veil { position: fixed; inset: 0; pointer-events: none; background: radial-gradient(ellipse at 50% 40%, rgba(242,242,240,.7), rgba(242,242,240,.15) 70%); }
+  main, footer { position: relative; }
   footer { max-width: 640px; margin: -40px auto 40px; padding: 0 26px; color: var(--muted); font-size: 11.5px; display: flex; gap: 14px; flex-wrap: wrap; }
   footer a { color: inherit; }
   @media (max-width: 680px) { footer { margin: 0 16px 24px; padding: 0; } }
@@ -112,6 +117,8 @@
 </style>
 </head>
 <body>
+<iframe id="backdrop" title="A fake run of Zurich playing in the background" aria-hidden="true" tabindex="-1"></iframe>
+<div id="veil"></div>
 <main id="app">
   <div class="brand">
     <img src="logo.svg" width="44" height="44" alt="">
@@ -456,7 +463,30 @@ function newFrame(url) {
   if (url) { fr.src = url; fr.addEventListener("load", () => fr.focus(), { once: true }); }  // keys work without a click first
   $("frame").replaceWith(fr);
 }
+// The background: demo/zurich.json (a fake run, see examples/make_fake_run.py) in the map page's demo mode.
+// Decoration only: if anything fails, the plain background stays. Stopped while a page is open, to free the GPU.
+let backdrop = null;
+async function showBackdrop() {
+  if (!backdrop) {
+    backdrop = (async () => {
+      const [data, template] = await Promise.all([
+        fetch("demo/zurich.json").then(r => { if (!r.ok) throw new Error(r.status); return r.json(); }),
+        fetch("page.html").then(r => { if (!r.ok) throw new Error(r.status); return r.text(); })]);
+      data.demo = true;
+      return URL.createObjectURL(new Blob(renderParts(template, data, { title: "Zurich", eyebrow: "", note: "" }), { type: "text/html" }));
+    })();
+  }
+  const url = await backdrop.catch(() => null), fr = $("backdrop");
+  if (!url || !$("viewer").hidden || fr.src === url) return;
+  fr.classList.remove("on");
+  fr.onload = () => setTimeout(() => fr.classList.add("on"), 800);  // after the first tiles
+  fr.src = url;
+}
+function hideBackdrop() { const fr = $("backdrop"); fr.onload = null; fr.classList.remove("on"); fr.src = "about:blank"; }
+showBackdrop();
+
 function openViewer() {
+  hideBackdrop();
   $("viewName").textContent = page.name;
   newFrame(page.url);
   $("viewer").hidden = false;
@@ -466,6 +496,7 @@ function openViewer() {
 function closeViewer() {
   $("viewer").hidden = true;
   newFrame(null);  // stops the animation and frees the GPU
+  showBackdrop();
   document.title = "MATSim agent viz";
 }
 $("close").onclick = () => (history.state?.viewer ? history.back() : closeViewer());

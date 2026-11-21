@@ -3,9 +3,10 @@
 //
 //   node tools/build.mjs RUN_FOLDER [--world] [--out FILE] [--sample 0.1] [--title TEXT] [--crs EPSG:2056]
 //                        [--events FILE] [--network FILE] [--schedule FILE] [--config FILE] [--sharing FILE]
-//                        [--no-rail] [--no-walk] [--no-passenger]
+//                        [--no-rail] [--no-walk] [--no-passenger] [--json]
 //
 // Writes agents_3d.html (agents_world.html with --world) into the run folder unless --out is given.
+// --json writes only the page data, without bike-sharing stations (how demo/zurich.json, the start page's background, is made).
 // OpenStreetMap tiles are cached in ~/.cache/matsim-agent-viz. Prints counts only.
 import { promises as fs, openAsBlob } from "node:fs";
 import { gunzipSync, gzipSync } from "node:zlib";
@@ -17,7 +18,7 @@ import { build, renderParts, findInputs, sharingFor, readConfig, BuildError, INP
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const USAGE = "usage: node tools/build.mjs RUN_FOLDER [--world] [--out FILE] [--sample 0.1] [--title TEXT] [--crs CRS]\n" +
-  "       [--events/--network/--schedule/--config/--sharing FILE] [--no-rail] [--no-walk] [--no-passenger]";
+  "       [--events/--network/--schedule/--config/--sharing FILE] [--no-rail] [--no-walk] [--no-passenger] [--json]";
 
 function parseArgs(argv) {
   const opt = { sample: 0.1, files: {} };
@@ -28,6 +29,7 @@ function parseArgs(argv) {
     else if (a === "--no-rail") opt.rail = false;
     else if (a === "--no-walk") opt.walk = false;
     else if (a === "--no-passenger") opt.passengers = false;
+    else if (a === "--json") opt.json = true;
     else if (a === "--out") opt.out = next();
     else if (a === "--sample") opt.sample = parseFloat(next());
     else if (a === "--title") opt.title = next();
@@ -120,6 +122,13 @@ try {
     progress: () => {},
   };
   const { payload, meta } = await build(files, { ...opt, folder: titleFolder(opt.dir) }, env, entries);
+  if (opt.json) {
+    if (!opt.out) die("--json needs --out FILE");
+    delete payload.sharing;
+    await fs.writeFile(opt.out, JSON.stringify(payload));
+    console.log(`wrote ${opt.out} (${((await fs.stat(opt.out)).size / 1e6).toFixed(1)} MB).`);
+    process.exit(0);
+  }
   const template = await fs.readFile(path.join(ROOT, opt.world ? "world.html" : "page.html"), "utf8");
   const out = opt.out ?? path.join(opt.dir, opt.world ? "agents_world.html" : "agents_3d.html");
   await fs.mkdir(path.dirname(path.resolve(out)), { recursive: true });
