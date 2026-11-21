@@ -2,6 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<!-- The page can reach only these hosts: map tiles, fonts and the map and 3D libraries. The run data is inside this file. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self';
+  script-src 'self' 'unsafe-inline' blob: https://unpkg.com https://cdn.jsdelivr.net;
+  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com;
+  font-src https://fonts.gstatic.com;
+  img-src 'self' data: blob: https://tiles.openfreemap.org https://tiles.mapterhorn.com;
+  connect-src 'self' https://tiles.openfreemap.org https://tiles.mapterhorn.com https://unpkg.com https://cdn.jsdelivr.net;
+  worker-src 'self' blob: https://cdn.jsdelivr.net; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__TITLE__ · MATSim</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -99,6 +107,7 @@
   .badge .key.on { display: grid; }
   .badge .key span { display: inline-flex; align-items: center; gap: 5px; }
   .badge .key i { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  body.demo .panel, body.demo .badge { display: none !important; }  /* the start page's moving background */
   .maplibregl-ctrl-attrib { font-size: 10px; background: rgba(255,255,255,.6) !important; }
 </style>
 </head>
@@ -179,6 +188,15 @@
 </div>
 <script>
 const DATA = __DATA__;
+// The start page shows a fake run behind its card (DATA.demo): no controls, and the camera circles slowly.
+const DEMO = DATA.demo === true, STILL = DEMO && matchMedia('(prefers-reduced-motion: reduce)').matches;
+if (DEMO) document.body.classList.add('demo');
+// It holds its first frame (the still the start page shows first, demo/zurich.webp) until the start page has faded it
+// in, then eases into motion. The zoom matches the still as the start page scales it to cover the window (taken at 1920×1080).
+let demoGo = null;
+addEventListener('message', e => { if (DEMO && e.source === parent && e.data?.demoGo && demoGo === null) demoGo = performance.now(); });
+const demoEase = now => { if (!DEMO) return 1; if (demoGo === null) return 0; const r = Math.min(1, (now - demoGo) / 3000); return r * r * (3 - 2 * r); };
+const escHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));  // mode names come from the run
 
 // ---------- modes: fixed names, colours and sizes so a mode looks the same in every run.
 // Walking is the largest group, so it gets quiet greys and smaller dots; the strong hues go to the modes people compare.
@@ -264,7 +282,7 @@ for (const i of order) {
   row.setAttribute('aria-pressed', 'true');
   const d = Math.round(10 * Math.min(md.size, 1.1));
   row.innerHTML = `<span class="sw" style="background:${md.colour};width:${d}px;height:${d}px"></span>
-    <span class="name">${md.name}</span><span class="count" title="legs in the sample">${md.count.toLocaleString()}</span>`;
+    <span class="name">${escHtml(md.name)}</span><span class="count" title="legs in the sample">${md.count.toLocaleString()}</span>`;
   row.onclick = () => { md.shown = !md.shown; drawModes(); dirty = true; };
   modesEl.appendChild(row);
 }
@@ -283,7 +301,7 @@ function drawModes() {
   const rank = md => { const k = KEY_ORDER.indexOf(md.id); return k < 0 ? 50 + md.count * -1e-9 : k; };
   key.innerHTML = modes.slice().sort((a, b) => rank(a) - rank(b))
     .filter(md => md.shown && md.id !== 'walk_loop' && md.id !== 'remote_walk')
-    .map(md => `<span><i style="background:${md.colour}"></i>${md.name}</span>`).join('');
+    .map(md => `<span><i style="background:${md.colour}"></i>${escHtml(md.name)}</span>`).join('');
 }
 drawModes();
 document.querySelectorAll('#colourSeg button').forEach(b => b.onclick = () => {
@@ -342,7 +360,7 @@ if (sh) {
 // ---------- speed
 let stateReady = false;
 const SPEEDS = [60, 240, 900, 1800];
-let speed = 240;
+let speed = DEMO ? 90 : 240;
 const speedEl = document.getElementById('speed');
 function drawSpeed() {
   speedEl.innerHTML = SPEEDS.map((v, i) =>
@@ -365,16 +383,17 @@ function drawState() {
 }
 stateReady = true;
 addEventListener('click', e => { const b = e.target.closest('button'); if (b && e.detail) b.blur(); });
-setPlaying(true);
+setPlaying(!STILL);
 playBtn.onclick = () => setPlaying(!playing);
 
-let t = Math.max(tMin, 7 * 3600), dirty = true;
+let t = Math.max(tMin, (DEMO ? 7.5 : 7) * 3600), dirty = true;
 slider.oninput = () => { t = +slider.value; dirty = true; };
 
 const panel = document.getElementById('panel'), badge = document.getElementById('badge');
 document.getElementById('help').onclick = () => document.getElementById('keys').classList.toggle('open');
 let labelsOn = false;
 addEventListener('keydown', e => {
+  if (DEMO) return;
   if (e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing); }
   else if (e.key === 'ArrowLeft') { e.preventDefault(); t = Math.max(+slider.min, t - 300); dirty = true; }
@@ -395,10 +414,10 @@ addEventListener('keydown', e => {
 const map = new maplibregl.Map({
   container: 'map',
   style: 'https://tiles.openfreemap.org/styles/positron',
-  center: DATA.centre, zoom: 13.9, pitch: 62, bearing: -15,
-  maxPitch: 80, attributionControl: { compact: true },
+  center: DATA.centre, zoom: 13.9 + (DEMO ? Math.log2(Math.max(innerWidth / 1920, innerHeight / 1080)) : 0), pitch: 62, bearing: -15,
+  maxPitch: 80, attributionControl: { compact: true }, interactive: !DEMO,
 });
-map.setPadding({ left: 300, top: 0, right: 0, bottom: 0 });
+map.setPadding({ left: DEMO ? 0 : 300, top: 0, right: 0, bottom: 0 });
 const DEM = { type: 'raster-dem', tiles: ['https://tiles.mapterhorn.com/{z}/{x}/{y}.webp'],
   tileSize: 512, encoding: 'terrarium', maxzoom: 14, attribution: '© Mapterhorn' };
 
@@ -492,6 +511,7 @@ map.on('load', () => {
     'circle-pitch-alignment': 'viewport', 'circle-pitch-scale': 'map' } });
 
   requestAnimationFrame(frame);
+  if (DEMO) map.once('idle', () => parent.postMessage({ demoReady: true }, location.origin));  // the start page fades it in now
 });
 
 // A station is an isometric icon: a pad with DOCKS docking posts, the bikes parked in them and a terminal with a
@@ -575,7 +595,9 @@ const clockEls = [document.getElementById('clock'), document.getElementById('bad
 const movingEls = [document.getElementById('moving'), document.getElementById('badgeMoving')];
 let last = performance.now(), lastPush = 0;
 function frame(now) {
-  if (playing) { t += (now - last) / 1000 * speed; if (t > +slider.max) t = +slider.min; dirty = true; }
+  const go = demoEase(now);
+  if (DEMO && !STILL && go > 0) map.setBearing(map.getBearing() + (now - last) / 1000 * 1.5 * go);  // a full circle in 4 minutes
+  if (playing && go > 0) { t += (now - last) / 1000 * speed * go; if (t > +slider.max) t = +slider.min; dirty = true; }
   last = now;
   if (dirty && now - lastPush > 50) {  // update dots ~20 times per second
     lastPush = now; dirty = false;

@@ -1,11 +1,12 @@
 # generated pages and run data
 *.html
+!index.html
 !page.html
 !world.html
-!launcher.html
 *.xml
 *.xml.gz
 *.csv.gz
 __pycache__/
 .venv/
+node_modules/
 .DS_Store

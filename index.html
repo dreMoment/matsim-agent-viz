@@ -1,0 +1,612 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<!-- What this page and the pages it builds may connect to. The run's files never leave this browser tab:
+     there is no server to send them to, and only these hosts can be reached at all.
+     overpass-api.de: OpenStreetMap tracks and footpaths, by tile bounds. epsg.io: coordinate-system codes the tool does not know.
+     The rest: map tiles, fonts and the map and 3D libraries. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self';
+  script-src 'self' 'unsafe-inline' blob: https://unpkg.com https://cdn.jsdelivr.net;
+  style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://unpkg.com;
+  font-src https://fonts.gstatic.com;
+  img-src 'self' data: blob: https://tiles.openfreemap.org https://tiles.mapterhorn.com;
+  connect-src 'self' https://overpass-api.de https://epsg.io https://tiles.openfreemap.org https://tiles.mapterhorn.com https://unpkg.com https://cdn.jsdelivr.net;
+  worker-src 'self' blob: https://cdn.jsdelivr.net; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MATSim agent viz</title>
+<meta name="description" content="Watch the agents of a MATSim run move over a 3D map, or explore the run in a 3D world. Your files stay in your browser.">
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<!-- the background map starts sooner when its data is fetched and the tile hosts are reached while the page loads -->
+<link rel="preload" href="demo/zurich.json" as="fetch" crossorigin>
+<link rel="preconnect" href="https://tiles.openfreemap.org" crossorigin>
+<link rel="preconnect" href="https://tiles.mapterhorn.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&display=swap" rel="stylesheet">
+<style>
+  :root { --ink: #16181d; --muted: #737882; --faint: #a9adb5; --line: rgba(0,0,0,.08); --ok: #1f8a4c; --bad: #c2410c; --bg: #f2f2f0; --card: #fff; }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--ink);
+    font: 13px/1.45 Inter, system-ui, -apple-system, sans-serif; font-feature-settings: "tnum" 1, "cv11" 1; }
+  main { max-width: 640px; margin: 56px auto; padding: 24px 26px 22px; background: var(--card); border: 1px solid var(--line);
+    border-radius: 14px; box-shadow: 0 6px 24px rgba(0,0,0,.06); }
+  @media (max-width: 680px) { main { margin: 16px; padding: 18px 16px; } }
+  .brand { display: flex; gap: 12px; align-items: center; }
+  .brand img { flex: none; }
+  .eyebrow { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 600; }
+  h1 { font-size: 22px; font-weight: 650; letter-spacing: -.02em; margin: 4px 0 2px; }
+  .lead { color: var(--muted); margin: 0 0 6px; }
+  .private { display: flex; gap: 8px; align-items: flex-start; margin: 14px 0 4px; padding: 10px 12px; border-radius: 10px;
+    background: #eef6f0; color: #24462f; font-size: 12.5px; }
+  .private b { font-weight: 600; }
+  .private svg { flex: none; margin-top: 1px; }
+  label.h { display: block; font-size: 11px; font-weight: 600; color: var(--muted); margin: 18px 0 6px; }
+  .row { display: flex; gap: 8px; align-items: center; }
+  input[type=text] { flex: 1; min-width: 0; font: inherit; padding: 8px 10px; border: 1px solid #d9dbdf; border-radius: 8px; background: #fff; color: var(--ink); }
+  input[type=text]:focus { outline: 2px solid #c9ccd2; outline-offset: -1px; }
+  button { font: inherit; cursor: pointer; border-radius: 8px; padding: 8px 12px; border: 1px solid #d9dbdf; background: #fff; color: var(--ink); white-space: nowrap; }
+  button:hover { background: #f6f6f5; }
+  button.primary { background: var(--ink); color: #fff; border-color: var(--ink); font-weight: 600; }
+  button.primary:hover { background: #2b2e35; }
+  button:disabled { opacity: .45; cursor: default; }
+  button.link { border: 0; padding: 2px 4px; color: var(--muted); font-size: 11.5px; background: none; }
+  button.link:hover { color: var(--ink); }
+  .drop { border: 1.5px dashed #d0d2d6; border-radius: 10px; padding: 16px; text-align: center; color: var(--muted); }
+  .drop.over { border-color: var(--ink); background: #f7f7f6; color: var(--ink); }
+  .drop .folder { color: var(--ink); font-weight: 600; }
+  .drop .row { justify-content: center; margin-top: 8px; }
+  .files { border: 1px solid var(--line); border-radius: 10px; margin-top: 10px; }
+  .files:empty { display: none; }
+  .file { display: grid; grid-template-columns: 16px 118px 1fr auto; gap: 10px; align-items: center; padding: 8px 10px; }
+  @media (max-width: 500px) { .file { grid-template-columns: 16px 1fr auto; } .file .role { grid-column: 2; } .file .what { grid-column: 2 / 4; } }
+  .file + .file { border-top: 1px solid var(--line); }
+  .file .mark { font-weight: 700; text-align: center; }
+  .file.found .mark { color: var(--ok); }
+  .file.missing .mark { color: var(--faint); }
+  .file.missing.required .mark, .file.missing.required .what { color: var(--bad); }
+  .file .role { font-weight: 600; }
+  .file .what { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .seg { display: inline-flex; background: #efefed; border-radius: 8px; padding: 2px; flex-wrap: wrap; }
+  .seg button { border: 0; background: transparent; padding: 5px 12px; color: var(--muted); border-radius: 6px; }
+  .seg button.on { background: #fff; color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
+  .toggle { display: flex; align-items: center; gap: 10px; margin-top: 16px; cursor: pointer; user-select: none; }
+  .toggle input { position: absolute; opacity: 0; pointer-events: none; }
+  .toggle .sw { position: relative; flex: none; width: 30px; height: 18px; border-radius: 9px; background: #d9dbdf; transition: background .15s; }
+  .toggle .sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff;
+    box-shadow: 0 1px 2px rgba(0,0,0,.2); transition: transform .15s; }
+  .toggle input:checked + .sw { background: var(--ink); }
+  .toggle input:checked + .sw::after { transform: translateX(12px); }
+  .toggle input:focus-visible + .sw { outline: 2px solid #c9ccd2; outline-offset: 2px; }
+  .toggle input:disabled ~ * { opacity: .45; }
+  .toggle:has(input:disabled) { cursor: default; }
+  .toggle .tl { font-weight: 600; }
+  .badge { font-size: 10px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--bad);
+    background: #fdf0e8; border-radius: 4px; padding: 1px 5px; margin-left: 6px; vertical-align: 1px; }
+  .hint { font-size: 11.5px; color: var(--muted); margin-top: 5px; }
+  .toggle + .hint { margin-left: 40px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 14px; }
+  @media (max-width: 500px) { .grid2 { grid-template-columns: 1fr; } }
+  .actions { display: flex; gap: 8px; align-items: center; margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--line); flex-wrap: wrap; }
+  .actions .spacer { flex: 1; }
+  .log { margin-top: 14px; background: #f7f7f6; border-radius: 8px; padding: 10px 12px; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+    color: #3b3f46; white-space: pre-wrap; max-height: 220px; overflow: auto; }
+  .log:empty { display: none; }
+  .error { margin-top: 14px; color: var(--bad); font-weight: 500; }
+  .error:empty { display: none; }
+  .progress { margin-top: 16px; }
+  .progress .bar { height: 6px; border-radius: 3px; background: #ececea; overflow: hidden; }
+  .progress .fill { height: 100%; width: 0; background: var(--ink); border-radius: 3px; transition: width .6s ease; }
+  .progress .fill.busy { width: 100% !important; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .progress .ptext { display: flex; justify-content: space-between; gap: 10px; margin-top: 6px; font-size: 12px; color: var(--muted); }
+  .progress .ptext span:first-child { color: var(--ink); font-weight: 500; }
+  .spin { display: inline-block; width: 10px; height: 10px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
+    animation: r .8s linear infinite; vertical-align: -1px; margin-right: 6px; }
+  @keyframes r { to { transform: rotate(360deg); } }
+  /* the start page's background: a fake run of Zurich playing, behind a light veil */
+  #poster, #backdrop { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; pointer-events: none; }
+  #poster { object-fit: cover; }
+  #backdrop { opacity: 0; transition: opacity .6s ease; }
+  #backdrop.on { opacity: 1; }
+  #veil { position: fixed; inset: 0; pointer-events: none; background: radial-gradient(ellipse at 50% 40%, rgba(242,242,240,.7), rgba(242,242,240,.15) 70%); }
+  main, footer { position: relative; }
+  footer { max-width: 640px; margin: -40px auto 40px; padding: 0 26px; color: var(--muted); font-size: 11.5px; display: flex; gap: 14px; flex-wrap: wrap; }
+  footer a { color: inherit; }
+  @media (max-width: 680px) { footer { margin: 0 16px 24px; padding: 0; } }
+  /* the built page, shown full screen with a thin bar on top */
+  #viewer { position: fixed; inset: 0; display: flex; flex-direction: column; background: var(--bg); z-index: 10; }
+  #viewer[hidden] { display: none; }
+  #viewer .bar { flex: none; display: flex; align-items: center; gap: 8px; padding: 6px 10px; background: var(--card); border-bottom: 1px solid var(--line); }
+  #viewer .bar .name { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #viewer .bar button { padding: 5px 10px; }
+  #viewer iframe { flex: 1; width: 100%; border: 0; display: block; }
+</style>
+</head>
+<body>
+<img id="poster" src="demo/zurich.webp" srcset="demo/zurich.webp 1920w, demo/zurich@2x.webp 3840w" sizes="100vw" alt="">
+<iframe id="backdrop" title="A fake run of Zurich playing in the background" aria-hidden="true" tabindex="-1"></iframe>
+<div id="veil"></div>
+<main id="app">
+  <div class="brand">
+    <img src="logo.svg" width="44" height="44" alt="">
+    <div><div class="eyebrow">MATSim · 3D agents</div>
+    <h1>Visualise a run</h1></div>
+  </div>
+  <p class="lead">Watch the agents of a MATSim run move over a 3D map, or explore the run in a 3D world.</p>
+  <div class="private">
+    <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 1a3.5 3.5 0 0 0-3.5 3.5V6H4a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V7a1 1 0 0 0-1-1h-.5V4.5A3.5 3.5 0 0 0 8 1Zm-2 5V4.5a2 2 0 1 1 4 0V6H6Z"/></svg>
+    <span><b>Your run stays on this computer.</b> The files are read in this browser tab and never uploaded: there is no server
+      to send them to. Only map tiles and, for trains and walkers, OpenStreetMap paths by tile are downloaded.</span>
+  </div>
+
+  <label class="h">Run folder</label>
+  <div class="drop" id="drop">
+    <div id="dropText">Drop the run's output folder here</div>
+    <div class="row"><button id="pickDir">Choose folder…</button></div>
+    <div class="hint" id="pickHint"></div>
+  </div>
+  <div class="files" id="files"></div>
+  <input type="file" id="dirInput" webkitdirectory multiple hidden>
+  <input type="file" id="fileInput" hidden>
+  <input type="file" id="pageInput" accept=".html,text/html" hidden>
+
+  <label class="toggle">
+    <input type="checkbox" id="world">
+    <span class="sw"></span>
+    <span class="tl">3D world<span class="badge">Experimental</span></span>
+  </label>
+  <div class="hint" id="kindHint"></div>
+
+  <label class="toggle">
+    <input type="checkbox" id="osm" checked>
+    <span class="sw"></span>
+    <span class="tl">Trains and walkers on OpenStreetMap paths</span>
+  </label>
+  <div class="hint">Off: trains and trams use the run's own links and walkers move in straight lines, with no download.</div>
+
+  <label class="h">Agents to show</label>
+  <div class="seg" id="sample">
+    <button data-v="0.01">1%</button><button data-v="0.05">5%</button><button data-v="0.1" class="on">10%</button><button data-v="0.25">25%</button><button data-v="1">All</button>
+  </div>
+  <div class="hint">Fewer agents make the page smaller and quicker to open (Zurich 10% run, 10% shown: about 34 MB).
+    The build still reads every event, so big runs take a while whatever you pick (reading a Zurich 10% run takes about 40 s).</div>
+
+  <div class="grid2">
+    <div>
+      <label class="h" for="title">Title</label>
+      <div class="row"><input type="text" id="title" placeholder="from the folder name"></div>
+    </div>
+    <div>
+      <label class="h" for="crs">Coordinate system</label>
+      <div class="row"><input type="text" id="crs" placeholder="from output_config" spellcheck="false"></div>
+      <div class="hint">Leave empty to use the config. Type e.g. EPSG:2056 or a proj string to override it.</div>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="primary" id="build" disabled>Build and open</button>
+    <button id="cancel" hidden>Stop</button>
+    <button id="openLast" hidden>Open last page</button>
+    <span class="spacer"></span>
+    <button class="link" id="openSaved">Open a saved page…</button>
+  </div>
+  <div class="progress" id="progress" hidden>
+    <div class="bar"><div class="fill" id="fill"></div></div>
+    <div class="ptext"><span id="pstep"></span><span id="pleft"></span></div>
+  </div>
+  <div class="error" id="error"></div>
+  <div class="log" id="log"></div>
+</main>
+<footer>
+  <a href="https://github.com/dreMoment/matsim-agent-viz">Source on GitHub</a>
+  <span>Map © OpenStreetMap contributors, OpenFreeMap, Mapterhorn</span>
+</footer>
+
+<div id="viewer" hidden>
+  <div class="bar">
+    <button id="close" title="Back to the run (Esc does not work inside the page: use this)">← Back</button>
+    <span class="name" id="viewName"></span>
+    <button id="save">Save page</button>
+  </div>
+  <iframe id="frame" title="The built page"></iframe>
+</div>
+
+<script type="module">
+import { INPUTS, findInputs, sharingFor, readConfig, scenarioName, renderParts, BuildError } from "./js/engine.js";
+
+const $ = id => document.getElementById(id);
+const ROLE_LABEL = { events: "Events", network: "Network", schedule: "Transit schedule", config: "Config", sharing: "Sharing stations" };
+const KIND_HINT = {
+  map: "Off: agents as dots over a tilted map with terrain and buildings.",
+  world: "On: a 3D world to explore: vehicles, walkers, buildings and trees. Click a vehicle to follow it.",
+};
+let folder = null;     // {name, entries: [{path, file}]}
+let found = {};        // role -> file found in the folder
+let files = {};        // role -> file used (found or chosen)
+let autoSharing = null;
+let sample = 0.1, kind = "map";
+let worker = null, started = 0;
+let checking = false;  // a folder or config is being read: Build waits
+let pickSeq = 0;       // drops a folder check that a newer pick has replaced
+let page = null;       // the last built or opened page: {url, name, html size}
+
+const mb = n => n == null ? "" : n >= 1e9 ? (n / 1e9).toFixed(1) + " GB" : n >= 1e6 ? (n / 1e6).toFixed(0) + " MB" : Math.max(1, Math.round(n / 1e3)) + " kB";
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+// ---- settings remembered in this browser only: sample, map or world, OpenStreetMap paths
+const store = {
+  get() { try { return JSON.parse(localStorage.getItem("matsim-agent-viz") || "{}"); } catch { return {}; } },
+  set(v) { try { localStorage.setItem("matsim-agent-viz", JSON.stringify({ ...store.get(), ...v })); } catch { /* private mode */ } },
+};
+
+// ---- reading the chosen folder: its files and those one level below (not ITERS, which holds every iteration)
+const skipErrors = async (fn, fallback) => { try { return await fn(); } catch { return fallback; } };  // an unreadable file or folder is left out
+async function fromHandle(dir) {
+  const entries = [];
+  for await (const h of dir.values()) {
+    if (h.kind === "file") { const f = await skipErrors(() => h.getFile()); if (f) entries.push({ path: `${dir.name}/${h.name}`, file: f }); }
+    else if (h.name !== "ITERS") {
+      await skipErrors(async () => {
+        for await (const g of h.values()) {
+          if (g.kind !== "file") continue;
+          const f = await skipErrors(() => g.getFile());
+          if (f) entries.push({ path: `${dir.name}/${h.name}/${g.name}`, file: f });
+        }
+      });
+    }
+  }
+  return { name: dir.name, entries };
+}
+function fromInput(list) {
+  const entries = [];
+  for (const f of list) {
+    const parts = f.webkitRelativePath.split("/");
+    if (parts.length <= 3 && parts[1] !== "ITERS") entries.push({ path: f.webkitRelativePath, file: f });
+  }
+  return { name: list[0]?.webkitRelativePath.split("/")[0] ?? "", entries };
+}
+function readEntries(dirEntry) {  // drag and drop: all entries of a directory (the reader returns them in batches)
+  return new Promise((resolve, reject) => {
+    const reader = dirEntry.createReader(), all = [];
+    const next = () => reader.readEntries(batch => { if (!batch.length) resolve(all); else { all.push(...batch); next(); } }, reject);
+    next();
+  });
+}
+const entryFile = e => new Promise((resolve, reject) => e.file(resolve, reject));
+async function fromDrop(dir) {
+  const entries = [];
+  for (const e of await readEntries(dir)) {
+    if (e.isFile) { const f = await skipErrors(() => entryFile(e)); if (f) entries.push({ path: `${dir.name}/${e.name}`, file: f }); }
+    else if (e.isDirectory && e.name !== "ITERS") {
+      for (const g of await skipErrors(() => readEntries(e), [])) {
+        const f = g.isFile && await skipErrors(() => entryFile(g));
+        if (f) entries.push({ path: `${dir.name}/${e.name}/${g.name}`, file: f });
+      }
+    }
+  }
+  return { name: dir.name, entries };
+}
+
+// Reads a folder with read(): the picker, the file input or a drop. Errors show on the page.
+async function openFolder(read) {
+  const seq = ++pickSeq;
+  folder = null; files = {}; found = {};
+  $("error").textContent = ""; $("log").textContent = "";
+  $("files").innerHTML = '<div class="file"><span></span><span class="what">Reading the folder…</span></div>';
+  checking = true; update();
+  try {
+    const f = await read();
+    if (seq !== pickSeq) return;
+    if (!f.entries.length) throw new Error("That folder is empty, or its files can't be read.");
+    const res = await findInputs(f.entries);
+    if (seq !== pickSeq) return;
+    folder = f; found = res; files = { ...res };
+    autoSharing = res.sharing;
+    $("dropText").innerHTML = `<span class="folder">${esc(f.name)}</span> · drop another folder to switch`;
+    $("title").value = ""; $("crs").value = "";
+    $("title").placeholder = scenarioName(f.name);
+    renderFiles();
+    await refreshFromConfig();
+    if (seq !== pickSeq) return;
+    if (!files.events && !files.network) $("error").textContent = "No MATSim output files in this folder. Choose the run's output folder (the one with output_events.xml.gz).";
+  } catch (e) {
+    if (seq !== pickSeq) return;
+    $("files").innerHTML = "";
+    $("dropText").textContent = "Drop the run's output folder here";
+    $("error").textContent = e.message || "That folder can't be read.";
+  } finally {
+    if (seq === pickSeq) { checking = false; update(); }
+  }
+}
+
+// The coordinate-system hint and the sharing station file follow whichever config file is used.
+async function refreshFromConfig() {
+  const cfg = files.config, here = folder;
+  if (!here) return;
+  let crs = null, sharing = null;
+  if (cfg) {
+    try {
+      const c = await readConfig(cfg);
+      const v = (c.params.coordinateSystem ?? "").trim();
+      crs = ["", "atlantis", "none"].includes(v.toLowerCase()) ? null : v;
+    } catch { /* the build will say what is wrong */ }
+    sharing = await sharingFor(here.entries, cfg);
+  }
+  if (folder !== here || files.config !== cfg) return;  // a newer folder or config took over
+  if (files.sharing === autoSharing && sharing !== autoSharing) { files.sharing = sharing; renderFiles(); }
+  autoSharing = sharing;
+  $("crs").placeholder = crs ? `${crs} (from config)` : cfg ? "not set in config: guessed from the network" : "guessed from the network (Swiss grids)";
+}
+
+function renderFiles() {
+  $("files").innerHTML = Object.entries(INPUTS).map(([role, f]) => {
+    const p = files[role];
+    const what = p ? `<span>${esc(p.name)} · ${mb(p.size)}${p !== found[role] ? " · chosen" : ""}</span>`
+                   : `<span>${f.required ? "missing, required" : "not found, optional"} · ${esc(f.use)}</span>`;
+    return `<div class="file ${p ? "found" : "missing"} ${f.required ? "required" : ""}" title="${esc(p ? p.name : f.name)}">
+      <span class="mark">${p ? "✓" : f.required ? "!" : "–"}</span>
+      <span class="role">${ROLE_LABEL[role]}</span>
+      <span class="what">${what}</span>
+      <button class="link" data-role="${role}">${p ? "Change…" : "Choose…"}</button></div>`;
+  }).join("");
+  $("files").querySelectorAll("button[data-role]").forEach(b => b.onclick = () => chooseFile(b.dataset.role));
+  update();
+}
+
+function chooseFile(role) {
+  const input = $("fileInput");
+  input.value = "";
+  input.onchange = async () => {
+    const f = input.files[0];
+    if (!f || worker || !folder) return;
+    files[role] = f;
+    renderFiles();
+    if (role !== "config") return;
+    const seq = ++pickSeq;  // a newer folder or config read wins
+    checking = true; update();
+    try { await refreshFromConfig(); } finally { if (seq === pickSeq) { checking = false; update(); } }
+  };
+  input.click();
+}
+
+function update() {
+  const running = !!worker;
+  const ready = folder && Object.entries(INPUTS).every(([r, f]) => !f.required || files[r]);
+  $("build").disabled = !ready || running || checking;
+  $("build").innerHTML = running ? '<span class="spin"></span>Building…' : "Build and open";
+  $("cancel").hidden = !running;
+  $("openLast").hidden = !page || running;
+  document.querySelectorAll("#pickDir, #title, #crs, #sample button, #world, #osm, #files button, #openSaved")
+    .forEach(el => el.disabled = running);
+}
+
+function setKind(v) {
+  kind = v === "world" ? "world" : "map";
+  $("world").checked = kind === "world";
+  $("kindHint").textContent = KIND_HINT[kind];
+}
+function setSample(v) {
+  sample = [0.01, 0.05, 0.1, 0.25, 1].includes(v) ? v : 0.1;
+  $("sample").querySelectorAll("button").forEach(x => x.classList.toggle("on", +x.dataset.v === sample));
+}
+
+// "about 40 s left", "about 3 min left": rounded so it doesn't jitter
+function timeLeft(s) {
+  if (s == null) return "estimating time left…";
+  if (s < 10) return "a few seconds left";
+  if (s < 90) return `about ${Math.round(s / 10) * 10} s left`;
+  return `about ${Math.round(s / 60)} min left`;
+}
+function showProgress(p) {
+  $("progress").hidden = !worker;
+  if (!worker) return;
+  if (!p) { $("pstep").textContent = "Starting…"; $("pleft").textContent = ""; $("fill").classList.remove("busy"); $("fill").style.width = "0"; return; }
+  const reading = !!p.reading;
+  $("fill").classList.toggle("busy", !reading);
+  if (reading) {
+    const pct = Math.floor(p.fraction * 100), elapsed = (performance.now() - started) / 1000;
+    const left = p.fraction > 0.03 && elapsed > 3 ? elapsed * (1 - p.fraction) / p.fraction : null;
+    $("fill").style.width = pct + "%";
+    $("pstep").textContent = `${p.step} · ${pct}%`;
+    $("pleft").textContent = timeLeft(left);
+  } else {
+    $("pstep").textContent = `${p.step}…`;
+    $("pleft").textContent = "";
+  }
+}
+
+function stopWorker() {
+  worker?.terminate();
+  worker = null;
+  showProgress(null);
+  update();
+}
+
+$("build").onclick = () => {
+  if (!folder || worker || checking) return;
+  openSeq++;  // a saved page still opening must not cover the build
+  $("error").textContent = ""; $("log").textContent = "";
+  const osm = $("osm").checked;
+  const opt = { sample, world: kind === "world", rail: osm, walk: osm, passengers: true,
+                title: $("title").value.trim(), crs: $("crs").value.trim(), folder: folder.name };
+  // Started from a blob: URL so the worker keeps this page's Content-Security-Policy. A worker loaded from its
+  // own URL would only follow a CSP header, which GitHub Pages can't send.
+  const shim = URL.createObjectURL(new Blob([`import ${JSON.stringify(new URL("./js/worker.js", import.meta.url).href)};`], { type: "text/javascript" }));
+  worker = new Worker(shim, { type: "module" });
+  setTimeout(() => URL.revokeObjectURL(shim), 10_000);
+  started = performance.now();
+  update(); showProgress(null);
+  const log = [];
+  worker.onmessage = ({ data }) => {
+    if (data.log) { log.push(data.log); $("log").textContent = log.join("\n"); $("log").scrollTop = 1e9; return; }
+    if (data.progress) { showProgress(data.progress); return; }
+    const secs = ((performance.now() - started) / 1000).toFixed(0);
+    stopWorker();
+    if (data.error) { $("error").textContent = data.error; return; }
+    const blob = data.done.page;
+    log.push(`built in ${secs} s, page ${mb(blob.size)}`);
+    $("log").textContent = log.join("\n");
+    setPage(blob, data.done.title + (opt.world ? " · 3D world" : ""), `${slug(data.done.title)}${opt.world ? "_world" : ""}.html`);
+    openViewer();
+  };
+  worker.onerror = e => { stopWorker(); $("error").textContent = `The build stopped: ${e.message || "unknown error"}. A very large run may need a smaller sample.`; };
+  worker.postMessage({ files, entries: folder.entries, opt });
+};
+$("cancel").onclick = () => { stopWorker(); $("error").textContent = "Stopped."; };
+
+const slug = s => (s || "matsim").normalize("NFKD").replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "matsim";
+
+// ---- the page viewer
+function setPage(blob, name, filename) {
+  if (page) URL.revokeObjectURL(page.url);
+  page = { url: URL.createObjectURL(blob), name, filename, size: blob.size };
+  update();
+}
+// A new iframe each time, so showing a page adds no browser history. It only ever shows pages made from this
+// site's own templates (a saved page is re-rendered from its data, see openSaved).
+function newFrame(url) {
+  const fr = document.createElement("iframe");
+  fr.id = "frame"; fr.title = "The built page";
+  if (url) { fr.src = url; fr.addEventListener("load", () => fr.focus(), { once: true }); }  // keys work without a click first
+  $("frame").replaceWith(fr);
+}
+// The background: demo/zurich.json (a fake run, see examples/make_fake_run.py) in the map page's demo mode.
+// demo/zurich.webp, a still of its first frame, shows at once; the live map fades in over it once its tiles are drawn.
+// Decoration only: if anything fails, the plain background stays. Stopped while a page is open, to free the GPU.
+let backdrop = null;
+async function showBackdrop() {
+  if (!backdrop) {
+    backdrop = (async () => {
+      const [data, template] = await Promise.all([
+        fetch("demo/zurich.json").then(r => { if (!r.ok) throw new Error(r.status); return r.json(); }),
+        fetch("page.html").then(r => { if (!r.ok) throw new Error(r.status); return r.text(); })]);
+      data.demo = true;
+      return URL.createObjectURL(new Blob(renderParts(template, data, { title: "Zurich", eyebrow: "", note: "" }), { type: "text/html" }));
+    })();
+  }
+  const url = await backdrop.catch(() => null), fr = $("backdrop");
+  if (!url || !$("viewer").hidden || fr.src === url) return;
+  fr.classList.remove("on");
+  fr.onload = () => { clearTimeout(fr.late); fr.late = setTimeout(revealBackdrop, 4000); };  // if it never says it's ready
+  fr.src = url;
+}
+addEventListener("message", e => {
+  const fr = $("backdrop");
+  if (e.source === fr.contentWindow && e.data?.demoReady) revealBackdrop();
+});
+// The live map shows the still's frame, so the fade is seamless; once it is done, the map starts moving (gently).
+function revealBackdrop() {
+  const fr = $("backdrop"), win = fr.contentWindow;
+  clearTimeout(fr.late);
+  fr.classList.add("on");
+  fr.late = setTimeout(() => { if (fr.contentWindow === win) win.postMessage({ demoGo: true }, location.origin); }, 650);
+}
+function hideBackdrop() { const fr = $("backdrop"); fr.onload = null; clearTimeout(fr.late); fr.classList.remove("on"); fr.src = "about:blank"; }
+showBackdrop();
+
+function openViewer() {
+  hideBackdrop();
+  $("viewName").textContent = page.name;
+  newFrame(page.url);
+  $("viewer").hidden = false;
+  document.title = `${page.name} · MATSim`;
+  if (!history.state?.viewer) history.pushState({ viewer: true }, "");
+}
+function closeViewer() {
+  $("viewer").hidden = true;
+  newFrame(null);  // stops the animation and frees the GPU
+  showBackdrop();
+  document.title = "MATSim agent viz";
+}
+$("close").onclick = () => (history.state?.viewer ? history.back() : closeViewer());
+window.addEventListener("popstate", () => { if (!history.state?.viewer) closeViewer(); else if (page) openViewer(); });
+$("save").onclick = () => {
+  const a = document.createElement("a");
+  a.href = page.url; a.download = page.filename;
+  document.body.append(a); a.click(); a.remove();
+};
+$("openLast").onclick = () => { openSeq++; if (page) openViewer(); };
+$("openSaved").onclick = () => { $("pageInput").value = ""; $("pageInput").click(); };
+$("pageInput").onchange = () => { const f = $("pageInput").files[0]; if (f) openSaved(f); };
+
+// A saved page may come from anyone, so its own HTML and scripts never run here. Only its data (parsed as JSON)
+// and its texts are taken, and the page is rendered again from this site's template.
+let openSeq = 0;  // a newer open (or a build) wins over a slower one
+async function openSaved(fileOrPromise) {
+  const seq = ++openSeq;
+  $("error").textContent = "";
+  let file = { name: "The file" };
+  try {
+    file = await fileOrPromise;
+    if (seq !== openSeq) return;  // superseded: don't read it at all
+    const text = await file.text();
+    if (seq !== openSeq) return;
+    // The data is one line of JSON right after the template's "<script>"; titles and texts come before it,
+    // HTML-escaped, so they can't hold this marker.
+    const m = /<script>(?:window\.DATA = |\r?\nconst DATA = )/.exec(text);  // LF or CRLF line endings
+    if (!m) throw new Error();
+    const world = m[0].includes("window.DATA"), start = m.index, from = start + m[0].length;
+    const eol = text.indexOf("\n", from);
+    const line = text.slice(from, eol < 0 ? text.length : eol);
+    const payload = JSON.parse(line.replace(/;\s*(<\/script>)?\s*$/, ""));
+    if (!Array.isArray(payload.modes) || !Array.isArray(payload.legs)) throw new Error();
+    const doc = new DOMParser().parseFromString(text.slice(0, start), "text/html");  // inert: nothing in it runs
+    const title = doc.title.replace(/ · MATSim( world)?$/, "") || file.name.replace(/\.html?$/i, "");
+    const eyebrow = doc.querySelector(".eyebrow")?.textContent.trim() || `${title} · last iteration`;
+    const note = (/(\S[^·\n]*?) · click a mode to hide it/.exec(doc.body.textContent) ?? [])[1] ?? "";
+    let template;
+    try {
+      const r = await fetch(world ? "world.html" : "page.html");
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      template = await r.text();
+    } catch (e) {
+      if (seq === openSeq) $("error").textContent = `Could not load the page template (${e.message}). Check the connection and reload the site.`;
+      return;
+    }
+    if (seq !== openSeq) return;
+    setPage(new Blob(renderParts(template, payload, { title, eyebrow, note }), { type: "text/html" }),
+      title + (world ? " · 3D world" : ""), file.name);
+    openViewer();
+  } catch (e) {
+    if (seq !== openSeq) return;
+    $("error").textContent = e instanceof RangeError || e instanceof BuildError ? `${file.name} is too large to open in this browser.`
+      : `${file.name} is not a page saved by this tool.`;
+  }
+}
+
+// ---- choosing the folder: the folder picker where the browser has one, else the file input; or drag and drop
+$("pickDir").onclick = async () => {
+  if (window.showDirectoryPicker) {
+    let dir;
+    try { dir = await window.showDirectoryPicker({ id: "matsim-run", mode: "read" }); } catch { return; }  // cancelled
+    openFolder(() => fromHandle(dir));
+  } else { $("dirInput").value = ""; $("dirInput").click(); }
+};
+$("dirInput").onchange = () => { const list = $("dirInput").files; if (list.length) openFolder(async () => fromInput(list)); };
+if (!window.showDirectoryPicker)
+  $("pickHint").textContent = "Your browser may ask whether to “upload” the files. They are only read here, in this tab.";
+const drop = $("drop");
+["dragenter", "dragover"].forEach(t => document.addEventListener(t, e => { e.preventDefault(); if (!worker) drop.classList.add("over"); }));
+["dragleave", "drop"].forEach(t => document.addEventListener(t, e => { e.preventDefault(); if (t === "drop" || !e.relatedTarget) drop.classList.remove("over"); }));
+document.addEventListener("drop", async e => {
+  if (worker) return;
+  const entry = [...e.dataTransfer.items].map(i => i.webkitGetAsEntry?.()).find(Boolean);
+  if (!entry) return;
+  if (entry.isDirectory) openFolder(() => fromDrop(entry));
+  else if (/\.html?$/i.test(entry.name)) openSaved(entryFile(entry));  // claims its turn now, reads the file after
+  else $("error").textContent = "Drop the run's output folder, not a single file.";
+});
+
+$("sample").querySelectorAll("button").forEach(b => b.onclick = () => { setSample(+b.dataset.v); store.set({ sample }); });
+$("world").onchange = e => { setKind(e.target.checked ? "world" : "map"); store.set({ kind }); };
+$("osm").onchange = e => store.set({ osm: e.target.checked });
+
+const saved = store.get();
+setSample(saved.sample ?? 0.1);
+setKind(saved.kind);
+$("osm").checked = saved.osm !== false;
+update();
+if (history.state?.viewer) history.replaceState(null, "");  // a reload has no page to show
+</script>
+</body>
+</html>
