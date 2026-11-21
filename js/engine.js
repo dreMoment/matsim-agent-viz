@@ -29,7 +29,10 @@ export const MIN_POINT_GAP_S = 10;  // thin out link events closer together than
 export const MERGE_TOL_M = 8.0;     // ... but only where the dropped point lies this close to the path, so turns stay
 
 export class BuildError extends Error {}
+/** The run's coordinate system is missing or unusable: the start page then asks for one. */
+export class CrsError extends BuildError {}
 const fail = msg => { throw new BuildError(msg); };
+const failCrs = msg => { throw new CrsError(msg); };
 
 // role -> file name in the run folder, required, what it is used for
 export const INPUTS = {
@@ -356,13 +359,13 @@ export async function parseCrs(value, env) {
         const text = r.ok ? (await r.text()).trim() : "";
         if (text.startsWith("+proj")) def = text.replace(/\s*\+nadgrids=\S+/g, "").replace(/\s*\+type=crs/, "");
       } catch { /* offline */ }
-      if (!def) fail(`cannot find coordinate system ${v}. Paste its proj string (from epsg.io) instead.`);
+      if (!def) failCrs(`cannot find coordinate system ${v}. Paste its proj string (from epsg.io) instead.`);
     }
   } else if (/^\+proj=|^(PROJCS|GEOGCS|PROJCRS|GEOGCRS)\[/i.test(v)) def = v;
-  else throw new BuildError(`cannot interpret coordinate system '${raw}'. Use e.g. EPSG:2056.`);
+  else failCrs(`cannot interpret coordinate system '${raw}'. Use e.g. EPSG:2056.`);
   let conv;
   try { conv = env.proj4(def, "EPSG:4326"); } catch {
-    fail(`cannot use coordinate system '${raw}'. Use e.g. EPSG:2056.`);
+    failCrs(`cannot use coordinate system '${raw}'. Use e.g. EPSG:2056.`);
   }
   const geographic = env.proj4.Proj(def).projName === "longlat";
   return { name: v, geographic, toWgs: p => conv.forward(p), fromWgs: p => conv.inverse(p) };
@@ -384,7 +387,7 @@ async function guessSwissCrs(points, env) {
     env.say("note: coordinate system not set in output_config, network matches EPSG:21781 (LV03)");
     return parseCrs("EPSG:21781", env);
   }
-  fail("coordinate system not set in output_config and the network is not in a Swiss grid. " +
+  failCrs("coordinate system not set in output_config and the network is not in a Swiss grid. " +
        "Set global.coordinateSystem in the config, or enter one, e.g. EPSG:25832.");
 }
 
@@ -1370,7 +1373,7 @@ export async function build(files, opt, env, entries = []) {
   else if (cfg && "coordinateSystem" in cfg.params) {
     const value = cfg.params.coordinateSystem;
     try { crs = await parseCrs(value, env); } catch (e) {
-      fail(`cannot interpret coordinateSystem '${value}' from ${config.name}. Enter a coordinate system, e.g. EPSG:2056.`);
+      failCrs(`cannot interpret coordinateSystem '${value}' from ${config.name}. Enter a coordinate system, e.g. EPSG:2056.`);
     }
   }
   env.say("reading network ...");
