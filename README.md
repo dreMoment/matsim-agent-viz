@@ -143,6 +143,7 @@ With `--osm`, the roads are central Zurich's real streets from OpenStreetMap ins
 - `world.html`: the 3D world template (three.js, no build step), filled in the same way. A worker inside it builds each map tile.
 - `tools/build.mjs`: the command line build
 - `demo/zurich.json`: the start page's moving background, a fake run of Zurich (no real data). Remake it with `uv run examples/make_fake_run.py FAKE_RUN --osm`, then `node tools/build.mjs FAKE_RUN --sample 1 --json --out demo/zurich.json`.
+- `demo/zurich.webp`: a still of the background's first frame (07:30, camera not yet turned), shown until the live map is drawn. Take it again when the map style or the fake run changes.
 - `logo.svg`: the logo and favicon
 - `vendor/proj4.mjs`: [proj4js](https://github.com/proj4js/proj4js) 2.22.0 (MIT) as one ES module, for coordinate systems
 

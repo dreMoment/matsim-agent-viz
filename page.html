@@ -506,6 +506,7 @@ map.on('load', () => {
     'circle-pitch-alignment': 'viewport', 'circle-pitch-scale': 'map' } });
 
   requestAnimationFrame(frame);
+  if (DEMO) map.once('idle', () => parent.postMessage({ demoReady: true }, location.origin));  // the start page fades it in now
 });
 
 // A station is an isometric icon: a pad with DOCKS docking posts, the bikes parked in them and a terminal with a
