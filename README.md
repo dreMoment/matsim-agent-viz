@@ -154,7 +154,7 @@ No build step: the files are served as they are. The `Deploy site` workflow (`.g
 
 Downloading tracks and footpaths from Overpass is the slow part of a first build. So the site also publishes them, as gzipped JSON under `osm/rail/` and `osm/walk/`, for the areas in `tools/osm-regions.json`: rail tracks for all of Switzerland, footpaths for the Zurich area. The page looks for a tile in the browser's cache, then on the site, and only then asks Overpass. The site is the same origin as the page, so no new host is involved. It's public OpenStreetMap data, no run data.
 
-The workflow downloads the tiles with `node tools/osm-tiles.mjs` (the engine's own queries), keeps them in the Actions cache, and refreshes them every Monday. A tile whose query changes in the engine is downloaded again on the next run. To cover another area, add a box to `tools/osm-regions.json`; a footpath tile is up to about 1.5 MB, a rail tile about 2 MB. `osm/` is not committed. Locally, the site works without it and falls back to Overpass.
+The workflow downloads the tiles with `node tools/osm-tiles.mjs` (the engine's own queries), keeps them in the Actions cache, and refreshes them every Monday. A tile whose query changes in the engine is downloaded again on the next run. If that download fails, the tile is removed, so the page asks Overpass instead of using the old data. To cover another area, add a box to `tools/osm-regions.json`; a footpath tile is up to about 1.5 MB, a rail tile about 2 MB. `osm/` is not committed. Locally, the site works without it and falls back to Overpass.
 
 ## License
 

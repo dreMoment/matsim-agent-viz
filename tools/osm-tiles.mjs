@@ -6,7 +6,8 @@
 //   node tools/osm-tiles.mjs [--out osm] [--regions tools/osm-regions.json] [--max-age-days 6] [--budget-min 0]
 //
 // A tile is downloaded again when it is older than --max-age-days or when the engine's query for it changed
-// (osm/queries.json keeps a hash of each tile's query). If a download fails, the old tile stays. With
+// (osm/queries.json keeps a hash of each tile's query). If a download fails, an old tile stays, unless its
+// query changed: then it is removed, so the page asks Overpass. With
 // --budget-min, downloads stop after that many minutes, so a slow Overpass can't hold up a deploy.
 // Tiles outside the regions are removed. In GitHub Actions, it sets the step output changed=true when
 // it changed osm/.
@@ -31,7 +32,13 @@ const BUDGET_MS = number("--budget-min", "0") * 60_000;
 
 const file = (kind, key) => path.join(OUT, kind, `${key}.json.gz`);
 const MANIFEST = path.join(OUT, "queries.json");
-const manifest = JSON.parse(await fs.readFile(MANIFEST, "utf8").catch(() => "{}"));
+let manifest = {};
+try { manifest = JSON.parse(await fs.readFile(MANIFEST, "utf8")) ?? {}; } catch { /* missing or broken: every tile counts as old */ }
+const saveManifest = async () => {
+  await fs.mkdir(OUT, { recursive: true });
+  await fs.writeFile(`${MANIFEST}.tmp`, JSON.stringify(manifest, null, 1));
+  await fs.rename(`${MANIFEST}.tmp`, MANIFEST);
+};
 const hash = text => createHash("sha256").update(text).digest("hex").slice(0, 16);
 
 let changed = false;
@@ -53,6 +60,7 @@ for (const [s, w, n, e] of Object.values(regions.walk ?? {}))
     for (const j of range(Math.floor(w / WALK_TILE), Math.floor(e / WALK_TILE))) tiles.walk.set(`${i}_${j}`, walkQuery(i, j));
 
 // Remove tiles outside the regions and files left by an interrupted run.
+await fs.rm(`${MANIFEST}.tmp`, { force: true });
 for (const kind of ["rail", "walk"]) {
   for (const name of await fs.readdir(path.join(OUT, kind)).catch(() => [])) {
     const key = name.endsWith(".json.gz") ? name.slice(0, -".json.gz".length) : null;
@@ -62,6 +70,11 @@ for (const kind of ["rail", "walk"]) {
     await markChanged();
   }
 }
+for (const id of Object.keys(manifest)) {
+  const [kind, key] = id.split("/");
+  if (!tiles[kind]?.has(key)) { delete manifest[id]; await markChanged(); }
+}
+if (changed) await saveManifest();
 
 const fresh = async (kind, key, query) => {
   if (manifest[`${kind}/${key}`] !== hash(query)) return false;
@@ -77,7 +90,7 @@ const store = {
     await fs.writeFile(`${f}.tmp`, gzipSync(text, { level: 9 }));
     await fs.rename(`${f}.tmp`, f);
     manifest[`${kind}/${key}`] = hash(tiles[kind].get(key));
-    await fs.writeFile(MANIFEST, JSON.stringify(manifest, null, 1));
+    await saveManifest();
     await markChanged();
   },
 };
@@ -86,15 +99,30 @@ const fetchWithAgent = (url, init = {}) => fetch(url, { ...init, headers: { ...i
 const env = { cache: store, fetch: fetchWithAgent, say: text => console.log(text) };
 const load = { rail: (lat, lon) => railTile(lat, lon, env), walk: (i, j) => walkTile(i, j, env) };
 
+// A tile from an older query is removed when no new one replaces it: the page then asks Overpass, rather than
+// reading data the engine no longer expects. A tile that is only old stays.
+const dropOld = async (kind, key) => {
+  const had = await fs.rm(file(kind, key)).then(() => true, () => false);
+  if (!had && !(`${kind}/${key}` in manifest)) return;
+  delete manifest[`${kind}/${key}`];
+  await saveManifest();
+  await markChanged();
+};
+
 const start = Date.now();
 let kept = 0, fetched = 0, failed = 0, skipped = 0;
 for (const kind of ["rail", "walk"]) {
   for (const [key, query] of tiles[kind]) {
     if (await fresh(kind, key, query)) { kept++; continue; }
-    if (BUDGET_MS && Date.now() - start > BUDGET_MS) { skipped++; continue; }
+    if (BUDGET_MS && Date.now() - start > BUDGET_MS) {
+      skipped++;
+      if (manifest[`${kind}/${key}`] !== hash(query)) await dropOld(kind, key);
+      continue;
+    }
     const t0 = Date.now();
     const data = await load[kind](...key.split("_").map(Number));
     if (data) fetched++; else failed++;
+    if (!data && manifest[`${kind}/${key}`] !== hash(query)) await dropOld(kind, key);
     console.log(`${kind} ${key}: ${data ? "downloaded" : "failed"} in ${Math.round((Date.now() - t0) / 1000)} s`);
     await new Promise(r => setTimeout(r, 2000));  // be gentle with the public Overpass server
   }
