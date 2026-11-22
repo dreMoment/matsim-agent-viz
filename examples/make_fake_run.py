@@ -3,7 +3,7 @@
     uv run examples/make_fake_run.py OUT_DIR          # street grid around Zurich HB, works offline
     uv run examples/make_fake_run.py OUT_DIR --osm    # real Zurich streets from OpenStreetMap (for demos)
 
-Public transport: a bus line on the roads, and an S-Bahn and a tram line at real Zurich stops that
+Public transport: a bus line on the roads (both ways), and an S-Bahn and a tram line at real Zurich stops that
 run on straight links between their stops, as pt2matsim builds them for rail."""
 import gzip, heapq, json, math, random, sys, urllib.parse, urllib.request
 from pathlib import Path
@@ -136,7 +136,7 @@ with gzip.open(out / "output_transitSchedule.xml.gz", "wt") as f:
         for k, (sid, x, y) in enumerate(stops):
             f.write(f'<stopFacility id="{sid}" x="{x}" y="{y}" linkRefId="pt_{sid}_{stops[k+1 if k+1 < len(stops) else k-1][0]}"/>\n')
     f.write('</transitStops>\n')
-    f.write('<transitLine id="bus"><transitRoute id="bus_e"><transportMode>bus</transportMode></transitRoute></transitLine>\n')
+    f.write('<transitLine id="bus">' + "".join(f'<transitRoute id="bus_{d}"><transportMode>bus</transportMode></transitRoute>' for d in "ew") + '</transitLine>\n')
     for line, mode, *_ in TRACK_LINES:
         f.write(f'<transitLine id="{line}">' + "".join(f'<transitRoute id="{line}_{d}"><transportMode>{mode}</transportMode></transitRoute>' for d in (0, 1)) + '</transitLine>\n')
     f.write('</transitSchedule>\n')
@@ -161,19 +161,21 @@ BIKES_PER_STATION = 3
 ev = []
 def E(t, typ, **kw): ev.append((t, len(ev), typ, kw))
 
-# buses: one every 10 min from 06:00 to 20:00, 40 s per link, 30 s dwell
-bus_times = {}
-for k, dep in enumerate(range(6*3600, 20*3600, 600)):
-    v = f"bus_{k}"; t = dep
-    E(t - 60, "TransitDriverStarts", driverId=f"pt_{v}", vehicleId=v, transitLineId="bus", transitRouteId="bus_e", departureId=v)
-    for s, n in enumerate(STOPS):
-        E(t, "VehicleArrivesAtFacility", vehicle=v, facility=f"s{s}")
-        bus_times.setdefault((k, s), t)
-        E(t+30, "VehicleDepartsAtFacility", vehicle=v, facility=f"s{s}")
-        t += 30
-        if s + 1 < len(STOPS):
-            for lid in route(n, STOPS[s+1]):
-                E(t, "entered link", vehicle=v, link=lid); t += link_len(lid) / 8
+# buses: each way ("e" west to east, "w" back), one every 10 min from 06:00 to 20:00, 8 m/s, 30 s dwell
+bus_times = {}  # (direction, k, stop index) -> arrival time
+for d in "ew":
+    seq = list(range(len(STOPS))) if d == "e" else list(range(len(STOPS)))[::-1]
+    for k, dep in enumerate(range(6*3600 + (0 if d == "e" else 300), 20*3600, 600)):
+        v = f"bus_{d}{k}"; t = dep
+        E(t - 60, "TransitDriverStarts", driverId=f"pt_{v}", vehicleId=v, transitLineId="bus", transitRouteId=f"bus_{d}", departureId=v)
+        for i, s in enumerate(seq):
+            E(t, "VehicleArrivesAtFacility", vehicle=v, facility=f"s{s}")
+            bus_times.setdefault((d, k, s), t)
+            E(t+30, "VehicleDepartsAtFacility", vehicle=v, facility=f"s{s}")
+            t += 30
+            if i + 1 < len(seq):
+                for lid in route(STOPS[s], STOPS[seq[i+1]]):
+                    E(t, "entered link", vehicle=v, link=lid); t += link_len(lid) / 8
 
 # trains and trams, both ways, 06:00 to 20:00, 30 s dwell
 track_times = {}  # (line, direction) -> [(vehicle, {stop: arrival time})]
@@ -204,7 +206,7 @@ for p in range(3000):
     if mode == "pt":  # PT riders live and work near a line: within a few hundred metres of two of its stops
         stops = [s[1:] for s in rnd.choice(TRACK_LINES)[2]] if by_rail else [NODES[s] for s in STOPS]
         i, j = sorted(rnd.sample(range(len(stops)), 2))
-        if rnd.random() < 0.5 and by_rail: i, j = j, i  # buses run west to east only, so bus riders live in the west
+        if rnd.random() < 0.5: i, j = j, i
         home, work = (nearest(x + rnd.uniform(-400, 400), y + rnd.uniform(-400, 400)) for x, y in (stops[i], stops[j]))
     if dist(home, work) < 300: continue
     for leg_no, (a, b, t0) in enumerate(((home, work, rnd.gauss(7.6*3600, 1800)), (work, home, rnd.gauss(17.3*3600, 2400)))):
@@ -248,8 +250,9 @@ for p in range(3000):
             s_a = min(range(len(STOPS)), key=lambda s: dist(STOPS[s], a))
             s_b = min(range(len(STOPS)), key=lambda s: dist(STOPS[s], b))
             wa, wb = walk_s(a, STOPS[s_a]), walk_s(STOPS[s_b], b)
-            if s_a >= s_b or wa + wb > MAX_ACCESS_S: continue  # buses run one way only
-            k = next((k for k in range(84) if bus_times.get((k, s_a), 0) > t0 + wa), None)
+            if s_a == s_b or wa + wb > MAX_ACCESS_S: continue
+            d = "e" if s_a < s_b else "w"
+            k = next((k for k in range(84) if bus_times.get((d, k, s_a), 0) > t0 + wa), None)
             if k is None: continue
             sn = STOPS[s_a]
             E(t0, "departure", person=pid, link=link_at(a), legMode="walk")
@@ -257,9 +260,9 @@ for p in range(3000):
             E(t0+wa, "actstart", person=pid, link=link_at(sn), actType="pt interaction", **xy(sn))
             E(t0+wa, "actend", person=pid, link=link_at(sn), actType="pt interaction", **xy(sn))
             E(t0+wa, "departure", person=pid, link=link_at(sn), legMode="pt")
-            E(bus_times[(k, s_a)]+5, "PersonEntersVehicle", person=pid, vehicle=f"bus_{k}")
-            ta = bus_times[(k, s_b)] + 5; en = STOPS[s_b]
-            E(ta, "PersonLeavesVehicle", person=pid, vehicle=f"bus_{k}")
+            E(bus_times[(d, k, s_a)]+5, "PersonEntersVehicle", person=pid, vehicle=f"bus_{d}{k}")
+            ta = bus_times[(d, k, s_b)] + 5; en = STOPS[s_b]
+            E(ta, "PersonLeavesVehicle", person=pid, vehicle=f"bus_{d}{k}")
             E(ta, "arrival", person=pid, link=link_at(en), legMode="pt")
             E(ta, "actstart", person=pid, link=link_at(en), actType="pt interaction", **xy(en))
             E(ta, "actend", person=pid, link=link_at(en), actType="pt interaction", **xy(en))

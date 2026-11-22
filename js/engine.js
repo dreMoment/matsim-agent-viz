@@ -1184,16 +1184,19 @@ async function buildLegs(file, sample, { linkFrom, linkMid }, stops, sharing, ro
   // than MIN_POINT_GAP_S older and the last one lies on the way (within MERGE_TOL_M of the line from the one
   // before to the new point), unless the last one is kept (a train's stop, which a track hop starts from).
   // Timing the gap from the point before, not the last one, keeps any merged line under MIN_POINT_GAP_S: a chain
-  // of merges could otherwise cut a whole street's bends, and a bus's dwell at a stop would be dropped.
+  // of merges could otherwise cut a whole street's bends, and a bus's dwell at a stop would be dropped. The points
+  // a chain has already dropped (leg.dropped) are checked again too, so the line never strays from any of them.
   const add = (person, t, xy, routed = false, keep = false) => {
     const leg = openLeg.get(person);
     if (!leg || !xy) return;
     if (routed) leg.routed = true;
     const pts = leg.pts, n = pts.length;
+    const last = n > 1 && [pts[n - 1][1], pts[n - 1][2]];
     if (n > 1 && t - pts[n - 2][0] < MIN_POINT_GAP_S && leg.kept !== n - 1 &&
-        simplify([[pts[n - 2][1], pts[n - 2][2]], [pts[n - 1][1], pts[n - 1][2]], xy], MERGE_TOL_M).length === 2) {
+        simplify([[pts[n - 2][1], pts[n - 2][2]], ...(leg.dropped ?? []), last, xy], MERGE_TOL_M).length === 2) {
+      (leg.dropped ??= []).push(last);
       pts[n - 1] = [t, xy[0], xy[1]];
-    } else pts.push([t, xy[0], xy[1]]);
+    } else { pts.push([t, xy[0], xy[1]]); leg.dropped = undefined; }
     if (keep) leg.kept = pts.length - 1;
   };
   const finish = person => {
@@ -1272,7 +1275,7 @@ async function buildLegs(file, sample, { linkFrom, linkMid }, stops, sharing, ro
       case "arrival":
         if (sampled(person) && openLeg.has(person)) {
           const leg = openLeg.get(person);
-          openLeg.delete(person);
+          openLeg.delete(person); leg.dropped = undefined;
           const end = linkMid.get(a.link);
           if (end) leg.pts.push([t, end[0], end[1]]);
           pending.set(person, leg);
