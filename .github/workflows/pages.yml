@@ -1,31 +1,28 @@
 # Publishes the site to GitHub Pages, with ready-made OpenStreetMap tiles under osm/ (tools/osm-tiles.mjs),
 # so builds in the regions of tools/osm-regions.json need no Overpass download. The tiles are kept between
-# runs in the Actions cache: a push reuses them, the weekly run refreshes them.
+# runs in the Actions cache: a push reuses them, the weekly run refreshes them. A pull request builds the site
+# without deploying it.
 name: Deploy site
 
 on:
   push:
     branches: [main]
+  pull_request:
   schedule:
     - cron: "17 3 * * 1"  # Mondays, refresh the tiles
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
     timeout-minutes: 180
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -41,8 +38,9 @@ jobs:
           restore-keys: osm-
 
       # A push keeps tiles up to 60 days old, so it deploys fast; the weekly run refreshes tiles older than a week.
+      # A pull request can restore the tiles of main, but its own cache stays on its branch.
       - name: Download missing or old tiles
-        run: node tools/osm-tiles.mjs --out osm --max-age-days ${{ github.event_name == 'push' && 60 || 7 }}
+        run: node tools/osm-tiles.mjs --out osm --max-age-days ${{ github.event_name == 'schedule' && 7 || 60 }}
 
       - name: Save OpenStreetMap tiles
         if: always()
@@ -61,5 +59,16 @@ jobs:
         with:
           path: _site
 
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
       - id: deploy
         uses: actions/deploy-pages@v4
