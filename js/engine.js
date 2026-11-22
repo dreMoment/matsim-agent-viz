@@ -1180,15 +1180,17 @@ async function buildLegs(file, sample, { linkFrom, linkMid }, stops, sharing, ro
   let nEvents = 0;
   const started = Date.now();
 
-  // Add a point to the person's open leg. Points closer in time than MIN_POINT_GAP_S replace the last one
-  // if it lies on the way (within MERGE_TOL_M of the line from the one before to the new point), unless that
-  // one is kept (a train's stop, which a track hop starts from).
+  // Add a point to the person's open leg. The new point replaces the last one if the point before that is less
+  // than MIN_POINT_GAP_S older and the last one lies on the way (within MERGE_TOL_M of the line from the one
+  // before to the new point), unless the last one is kept (a train's stop, which a track hop starts from).
+  // Timing the gap from the point before, not the last one, keeps any merged line under MIN_POINT_GAP_S: a chain
+  // of merges could otherwise cut a whole street's bends, and a bus's dwell at a stop would be dropped.
   const add = (person, t, xy, routed = false, keep = false) => {
     const leg = openLeg.get(person);
     if (!leg || !xy) return;
     if (routed) leg.routed = true;
     const pts = leg.pts, n = pts.length;
-    if (n > 1 && t - pts[n - 1][0] < MIN_POINT_GAP_S && leg.kept !== n - 1 &&
+    if (n > 1 && t - pts[n - 2][0] < MIN_POINT_GAP_S && leg.kept !== n - 1 &&
         simplify([[pts[n - 2][1], pts[n - 2][2]], [pts[n - 1][1], pts[n - 1][2]], xy], MERGE_TOL_M).length === 2) {
       pts[n - 1] = [t, xy[0], xy[1]];
     } else pts.push([t, xy[0], xy[1]]);

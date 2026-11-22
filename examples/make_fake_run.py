@@ -192,34 +192,50 @@ for line, mode, stops, hop, headway in TRACK_LINES:
 
 bike_trips = []  # PubliBike trips are played out afterwards, in time order, so station stocks stay right
 TELE = {"walk": 1.3, "bike": 4.2, "publibike": 4.0, "car_passenger": 8.0, "truck": 9.0, "outside": 12.0, "remote_walk": 1.3}
+def gap(p, q):  # metres between two nodes or (x, y) points
+    (px, py), (qx, qy) = (p if isinstance(p, tuple) else NODES[p]), (q if isinstance(q, tuple) else NODES[q])
+    return math.hypot(px - qx, py - qy)
+def walk_s(p, q): return gap(p, q) * 1.3 / TELE["walk"]  # a walk's duration, at walking speed on a detour of 1.3
+MAX_ACCESS_S = 1500  # PT riders with more walking to and from the stops than this (about 1.5 km) stay home
 for p in range(3000):
     pid = f"p{p}"; mode = rnd.choices(["car", "pt", "walk", "bike", "publibike", "car_passenger", "truck", "outside", "remote_walk"], [30, 25, 20, 8, 4, 6, 3, 3, 1])[0]
     home, work = rnd.choice(PLACES), rnd.choice(PLACES)
+    by_rail = mode == "pt" and rnd.random() < 0.5
+    if mode == "pt":  # PT riders live and work near a line: within a few hundred metres of two of its stops
+        stops = [s[1:] for s in rnd.choice(TRACK_LINES)[2]] if by_rail else [NODES[s] for s in STOPS]
+        i, j = sorted(rnd.sample(range(len(stops)), 2))
+        if rnd.random() < 0.5 and by_rail: i, j = j, i  # buses run west to east only, so bus riders live in the west
+        home, work = (nearest(x + rnd.uniform(-400, 400), y + rnd.uniform(-400, 400)) for x, y in (stops[i], stops[j]))
     if dist(home, work) < 300: continue
     for leg_no, (a, b, t0) in enumerate(((home, work, rnd.gauss(7.6*3600, 1800)), (work, home, rnd.gauss(17.3*3600, 2400)))):
         if mode == "publibike":
             bike_trips.append((pid, leg_no, a, b, t0)); continue
         E(t0, "actend", person=pid, link=link_at(a), actType="home" if leg_no == 0 else "work", **xy(a))
-        if mode == "car":
-            E(t0, "departure", person=pid, link=link_at(a), legMode="car")
+        if mode in ("car", "truck"):  # both drive on the network; a link is entered when the one before is done
+            E(t0, "departure", person=pid, link=link_at(a), legMode=mode)
             E(t0+1, "PersonEntersVehicle", person=pid, vehicle=pid)
             t = t0 + 1
-            speed = rnd.uniform(5, 12)
-            for lid in route(a, b): t += link_len(lid) / speed; E(t, "entered link", vehicle=pid, link=lid)
-            E(t+20, "PersonLeavesVehicle", person=pid, vehicle=pid); t += 20
-            E(t, "arrival", person=pid, link=link_at(b), legMode="car")
-        elif mode == "pt" and rnd.random() < 0.5:
-            line, _, stops, *_ = rnd.choice(TRACK_LINES)
-            ia, ib = rnd.sample(range(len(stops)), 2); d = 0 if ia < ib else 1
+            speed = rnd.uniform(5, 12) if mode == "car" else rnd.uniform(5, 9)
+            for lid in route(a, b): E(t, "entered link", vehicle=pid, link=lid); t += link_len(lid) / speed
+            E(t+5, "PersonLeavesVehicle", person=pid, vehicle=pid); t += 5
+            E(t, "arrival", person=pid, link=link_at(b), legMode=mode)
+        elif by_rail:
+            # the train or tram line with the shortest walks: board at the stop nearest home, leave at the one nearest work
+            line, stops, ia, ib = min(((l, st, min(range(len(st)), key=lambda i: gap(tuple(st[i][1:]), a)),
+                                        min(range(len(st)), key=lambda i: gap(tuple(st[i][1:]), b))) for l, _, st, *_ in TRACK_LINES),
+                                      key=lambda c: gap(tuple(c[1][c[2]][1:]), a) + gap(tuple(c[1][c[3]][1:]), b))
             (sa, xa, ya), (sb, xb, yb) = stops[ia], stops[ib]
-            run = next(((v, tm) for v, tm in track_times[(line, d)] if tm[sa] > t0 + 300), None)
+            wa, wb = walk_s(a, (xa, ya)), walk_s((xb, yb), b)
+            if ia == ib or wa + wb > MAX_ACCESS_S: continue
+            d = 0 if ia < ib else 1
+            run = next(((v, tm) for v, tm in track_times[(line, d)] if tm[sa] > t0 + wa), None)
             if run is None: continue
             v, tm = run
             E(t0, "departure", person=pid, link=link_at(a), legMode="walk")
-            E(t0+300, "arrival", person=pid, link=f"pt_{sa}_{stops[ia+1 if ia+1 < len(stops) else ia-1][0]}", legMode="walk")
-            E(t0+300, "actstart", person=pid, link="", actType="pt interaction", x=str(xa), y=str(ya))
-            E(t0+300, "actend", person=pid, link="", actType="pt interaction", x=str(xa), y=str(ya))
-            E(t0+300, "departure", person=pid, link="", legMode="pt")
+            E(t0+wa, "arrival", person=pid, link=f"pt_{sa}_{stops[ia+1 if ia+1 < len(stops) else ia-1][0]}", legMode="walk")
+            E(t0+wa, "actstart", person=pid, link="", actType="pt interaction", x=str(xa), y=str(ya))
+            E(t0+wa, "actend", person=pid, link="", actType="pt interaction", x=str(xa), y=str(ya))
+            E(t0+wa, "departure", person=pid, link="", legMode="pt")
             E(tm[sa]+5, "PersonEntersVehicle", person=pid, vehicle=v)
             ta = tm[sb] + 5
             E(ta, "PersonLeavesVehicle", person=pid, vehicle=v)
@@ -227,19 +243,20 @@ for p in range(3000):
             E(ta, "actstart", person=pid, link="", actType="pt interaction", x=str(xb), y=str(yb))
             E(ta, "actend", person=pid, link="", actType="pt interaction", x=str(xb), y=str(yb))
             E(ta, "departure", person=pid, link="", legMode="walk")
-            t = ta + 300; E(t, "arrival", person=pid, link=link_at(b), legMode="walk")
+            t = ta + wb; E(t, "arrival", person=pid, link=link_at(b), legMode="walk")
         elif mode == "pt":
             s_a = min(range(len(STOPS)), key=lambda s: dist(STOPS[s], a))
             s_b = min(range(len(STOPS)), key=lambda s: dist(STOPS[s], b))
-            if s_a >= s_b: s_a, s_b = 0, len(STOPS)-1  # buses run one way only
-            k = next((k for k in range(84) if bus_times.get((k, s_a), 0) > t0 + 300), None)
+            wa, wb = walk_s(a, STOPS[s_a]), walk_s(STOPS[s_b], b)
+            if s_a >= s_b or wa + wb > MAX_ACCESS_S: continue  # buses run one way only
+            k = next((k for k in range(84) if bus_times.get((k, s_a), 0) > t0 + wa), None)
             if k is None: continue
             sn = STOPS[s_a]
             E(t0, "departure", person=pid, link=link_at(a), legMode="walk")
-            E(t0+300, "arrival", person=pid, link=link_at(sn), legMode="walk")
-            E(t0+300, "actstart", person=pid, link=link_at(sn), actType="pt interaction", **xy(sn))
-            E(t0+300, "actend", person=pid, link=link_at(sn), actType="pt interaction", **xy(sn))
-            E(t0+300, "departure", person=pid, link=link_at(sn), legMode="pt")
+            E(t0+wa, "arrival", person=pid, link=link_at(sn), legMode="walk")
+            E(t0+wa, "actstart", person=pid, link=link_at(sn), actType="pt interaction", **xy(sn))
+            E(t0+wa, "actend", person=pid, link=link_at(sn), actType="pt interaction", **xy(sn))
+            E(t0+wa, "departure", person=pid, link=link_at(sn), legMode="pt")
             E(bus_times[(k, s_a)]+5, "PersonEntersVehicle", person=pid, vehicle=f"bus_{k}")
             ta = bus_times[(k, s_b)] + 5; en = STOPS[s_b]
             E(ta, "PersonLeavesVehicle", person=pid, vehicle=f"bus_{k}")
@@ -247,7 +264,7 @@ for p in range(3000):
             E(ta, "actstart", person=pid, link=link_at(en), actType="pt interaction", **xy(en))
             E(ta, "actend", person=pid, link=link_at(en), actType="pt interaction", **xy(en))
             E(ta, "departure", person=pid, link=link_at(en), legMode="walk")
-            t = ta + 300; E(t, "arrival", person=pid, link=link_at(b), legMode="walk")
+            t = ta + wb; E(t, "arrival", person=pid, link=link_at(b), legMode="walk")
         else:
             d = dist(a, b) * 1.3
             E(t0, "departure", person=pid, link=link_at(a), legMode=mode)
