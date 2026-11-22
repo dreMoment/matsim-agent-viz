@@ -197,7 +197,7 @@
     <span class="spacer"></span>
     <button class="link" id="openSaved">Open a saved page…</button>
   </div>
-  <div class="error" id="error"></div>
+  <div class="error" id="error" role="alert"></div>
 </main>
 
 <!-- in front of the blurred form while a build runs -->
@@ -208,7 +208,7 @@
       <div class="sub" id="wkSub"></div>
       <div class="progress">
         <div class="bar"><div class="fill" id="fill"></div></div>
-        <div class="ptext"><span id="pstep" aria-live="polite"></span><span id="pleft"></span></div>
+        <div class="ptext"><span><span id="pstep" aria-live="polite"></span><span id="ppct"></span></span><span id="pleft"></span></div>
       </div>
     </div>
     <details id="logBox"><summary>Details</summary><div class="log" id="log"></div></details>
@@ -419,18 +419,19 @@ function showWorking(on) {
 }
 function showProgress(p) {
   if (!worker) return;
-  if (!p) { $("pstep").textContent = "Starting…"; $("pleft").textContent = ""; $("fill").classList.remove("busy"); $("fill").style.width = "0"; return; }
+  if (!p) { $("pstep").textContent = "Starting…"; $("ppct").textContent = $("pleft").textContent = ""; $("fill").classList.remove("busy"); $("fill").style.width = "0"; return; }
   const reading = !!p.reading;
   $("fill").classList.toggle("busy", !reading);
   if (reading) {
     const pct = Math.floor(p.fraction * 100), elapsed = (performance.now() - started) / 1000;
     const left = p.fraction > 0.03 && elapsed > 3 ? elapsed * (1 - p.fraction) / p.fraction : null;
     $("fill").style.width = pct + "%";
-    $("pstep").textContent = `${p.step} · ${pct}%`;
+    if ($("pstep").textContent !== p.step) $("pstep").textContent = p.step;  // only a new step is announced
+    $("ppct").textContent = ` · ${pct}%`;
     $("pleft").textContent = timeLeft(left);
   } else {
     $("pstep").textContent = `${p.step}…`;
-    $("pleft").textContent = "";
+    $("ppct").textContent = $("pleft").textContent = "";
   }
 }
 
