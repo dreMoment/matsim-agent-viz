@@ -1,7 +1,8 @@
 """Write a tiny fake MATSim output folder (events, network, schedule, config, bike-sharing stations).
 
     uv run examples/make_fake_run.py OUT_DIR          # street grid around Zurich HB, works offline
-    uv run examples/make_fake_run.py OUT_DIR --osm    # real Zurich streets from OpenStreetMap (for demos)
+    uv run examples/make_fake_run.py OUT_DIR --osm    # real Zurich streets from OpenStreetMap
+    uv run examples/make_fake_run.py OUT_DIR --osm --demo   # the site's demo: no bike sharing, no "outside" legs
 
 Public transport: a bus line on the roads (both ways), and an S-Bahn and a tram line at real Zurich stops that
 run on straight links between their stops, as pt2matsim builds them for rail."""
@@ -10,6 +11,7 @@ from pathlib import Path
 
 args = [a for a in sys.argv[1:] if not a.startswith("--")]
 OSM = "--osm" in sys.argv
+DEMO = "--demo" in sys.argv  # leave out PubliBike (a Swiss service) and "outside" (a scenario detail)
 if len(args) != 1: sys.exit(__doc__)
 out = Path(args[0]); out.mkdir(parents=True, exist_ok=True)
 rnd = random.Random(3)
@@ -145,7 +147,7 @@ with gzip.open(out / "output_transitSchedule.xml.gz", "wt") as f:
 BIKE_STATIONS = [nearest(CX + fx*W, CY + fy*H) for fx, fy in
                  ((-.36, -.36), (-.36, 0), (-.36, .36), (0, -.36), (0, .36), (.36, -.36), (.36, 0), (.36, .36), (-.16, -.16), (.16, .16))]
 BIKES_PER_STATION = 3
-(out / "publibike_service.xml").write_text('<?xml version="1.0" encoding="utf-8"?>\n<service>\n<stations>\n'
+if not DEMO: (out / "publibike_service.xml").write_text('<?xml version="1.0" encoding="utf-8"?>\n<service>\n<stations>\n'
     + "".join(f'<station id="st{k}" link="{link_at(n)}" capacity="100"/>\n' for k, n in enumerate(BIKE_STATIONS))
     + '</stations>\n<vehicles>\n'
     + "".join(f'<vehicle id="b{k}_{b}" startStation="st{k}" startLink="{link_at(n)}"/>\n'
@@ -153,10 +155,10 @@ BIKES_PER_STATION = 3
     + '</vehicles>\n</service>\n')
 
 (out / "output_config.xml").write_text('<?xml version="1.0"?>\n<config><module name="global">'
-    '<param name="coordinateSystem" value="EPSG:2056"/></module>'
+    '<param name="coordinateSystem" value="EPSG:2056"/></module>' + ("</config>\n" if DEMO else
     '<module name="sharing"><parameterset type="mode"><param name="id" value="publibike"/>'
     '<param name="mode" value="publibike"/><param name="serviceScheme" value="StationBased"/>'
-    '<param name="serviceInputFile" value="publibike_service.xml"/></parameterset></module></config>\n')
+    '<param name="serviceInputFile" value="publibike_service.xml"/></parameterset></module></config>\n'))
 
 ev = []
 def E(t, typ, **kw): ev.append((t, len(ev), typ, kw))
@@ -199,8 +201,10 @@ def gap(p, q):  # metres between two nodes or (x, y) points
     return math.hypot(px - qx, py - qy)
 def walk_s(p, q): return gap(p, q) * 1.3 / TELE["walk"]  # a walk's duration, at walking speed on a detour of 1.3
 MAX_ACCESS_S = 1500  # PT riders with more walking to and from the stops than this (about 1.5 km) stay home
+MODES = {"car": 30, "pt": 25, "walk": 20, "bike": 8, "publibike": 4, "car_passenger": 6, "truck": 3, "outside": 3, "remote_walk": 1}
+if DEMO: MODES = {m: w for m, w in MODES.items() if m not in ("publibike", "outside")}
 for p in range(3000):
-    pid = f"p{p}"; mode = rnd.choices(["car", "pt", "walk", "bike", "publibike", "car_passenger", "truck", "outside", "remote_walk"], [30, 25, 20, 8, 4, 6, 3, 3, 1])[0]
+    pid = f"p{p}"; mode = rnd.choices(list(MODES), list(MODES.values()))[0]
     home, work = rnd.choice(PLACES), rnd.choice(PLACES)
     by_rail = mode == "pt" and rnd.random() < 0.5
     if mode == "pt":  # PT riders live and work near a line: within a few hundred metres of two of its stops
@@ -208,6 +212,7 @@ for p in range(3000):
         i, j = sorted(rnd.sample(range(len(stops)), 2))
         if rnd.random() < 0.5: i, j = j, i
         home, work = (nearest(x + rnd.uniform(-400, 400), y + rnd.uniform(-400, 400)) for x, y in (stops[i], stops[j]))
+    while "walk" in mode and dist(home, work) > 2500: work = rnd.choice(PLACES)  # nobody walks across town
     if dist(home, work) < 300: continue
     for leg_no, (a, b, t0) in enumerate(((home, work, rnd.gauss(7.6*3600, 1800)), (work, home, rnd.gauss(17.3*3600, 2400)))):
         if mode == "publibike":
