@@ -106,7 +106,8 @@ try {
   if (!(await fs.stat(opt.dir).catch(() => null))?.isDirectory()) die(`ERROR: run folder ${opt.dir} not found.`);
   const entries = await listFolder(opt.dir);
   const files = await findInputs(entries);
-  const runDir = path.join(path.dirname(path.resolve(opt.dir)), outputFolder(entries));  // where the outputs are
+  const outDir = outputFolder(entries);  // where the outputs are
+  const runDir = outDir ? path.join(path.dirname(path.resolve(opt.dir)), outDir) : path.resolve(opt.dir);
   for (const [role, p] of Object.entries(opt.files)) {
     if (!(await fs.stat(p).catch(() => null))?.isFile()) die(`ERROR: ${p} not found.`);
     files[role] = await asFile(p);
