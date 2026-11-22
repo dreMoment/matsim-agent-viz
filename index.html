@@ -430,8 +430,11 @@ function showProgress(p) {
     $("ppct").textContent = ` · ${pct}%`;
     $("pleft").textContent = timeLeft(left);
   } else {
-    $("pstep").textContent = `${p.step}…`;
-    $("ppct").textContent = $("pleft").textContent = "";
+    const [head, tail] = p.step.split(": ");  // "Rail tracks: tile 3 of 60": only "Rail tracks" is announced
+    const step = tail ? head : `${head}…`;
+    if ($("pstep").textContent !== step) $("pstep").textContent = step;
+    $("ppct").textContent = tail ? ` · ${tail}…` : "";
+    $("pleft").textContent = "";
   }
 }
 
