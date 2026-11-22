@@ -91,16 +91,32 @@
   .log:empty { display: none; }
   .error { margin-top: 14px; color: var(--bad); font-weight: 500; }
   .error:empty { display: none; }
-  .progress { margin-top: 16px; }
-  .progress .bar { height: 6px; border-radius: 3px; background: #ececea; overflow: hidden; }
+  /* while a build runs: the form stays behind, blurred, with the build card in front */
+  main, footer { transition: filter .3s ease, opacity .3s ease; }
+  body.building main, body.building footer { filter: blur(4px); opacity: .8; }
+  #working { position: fixed; inset: 0; z-index: 5; display: grid; place-items: center; padding: 16px; }
+  #working[hidden] { display: none; }
+  #working .card { width: min(440px, 100%); padding: 22px 24px 18px; background: var(--card); border: 1px solid var(--line);
+    border-radius: 14px; box-shadow: 0 18px 48px rgba(0,0,0,.14); animation: rise .3s ease; }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px) scale(.98); } }
+  #working .card:focus { outline: none; }
+  @media (prefers-reduced-motion: reduce) { #working .card { animation: none; } main, footer { transition: none; } }
+  #working .actions { margin-top: 18px; padding-top: 14px; }
+  .wk h2 { font-size: 17px; font-weight: 650; letter-spacing: -.01em; margin: 0 0 2px; }
+  .wk .sub { color: var(--muted); }
+  #working .actions .note { color: var(--muted); font-size: 11.5px; }
+  #logBox { margin-top: 14px; }
+  #logBox summary { cursor: pointer; color: var(--muted); font-size: 11.5px; width: max-content; }
+  #logBox summary:hover { color: var(--ink); }
+  #logBox:has(.log:empty) { display: none; }
+  #logBox .log { max-height: 160px; }
+  .progress { margin-top: 20px; }
+  .progress .bar { height: 8px; border-radius: 4px; background: #ececea; overflow: hidden; }
   .progress .fill { height: 100%; width: 0; background: var(--ink); border-radius: 3px; transition: width .6s ease; }
   .progress .fill.busy { width: 100% !important; animation: pulse 1.2s ease-in-out infinite; }
   @keyframes pulse { 50% { opacity: .35; } }
-  .progress .ptext { display: flex; justify-content: space-between; gap: 10px; margin-top: 6px; font-size: 12px; color: var(--muted); }
+  .progress .ptext { display: flex; justify-content: space-between; gap: 10px; margin-top: 10px; font-size: 13px; color: var(--muted); }
   .progress .ptext span:first-child { color: var(--ink); font-weight: 500; }
-  .spin { display: inline-block; width: 10px; height: 10px; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%;
-    animation: r .8s linear infinite; vertical-align: -1px; margin-right: 6px; }
-  @keyframes r { to { transform: rotate(360deg); } }
   /* the start page's background: a fake run of Zurich playing, behind a light veil */
   #poster, #backdrop { position: fixed; inset: 0; width: 100%; height: 100%; border: 0; pointer-events: none; }
   #poster { object-fit: cover; }
@@ -177,18 +193,32 @@
 
   <div class="actions">
     <button class="primary" id="build" disabled>Build and open</button>
-    <button id="cancel" hidden>Stop</button>
     <button id="openLast" hidden>Open last page</button>
     <span class="spacer"></span>
     <button class="link" id="openSaved">Open a saved page…</button>
   </div>
-  <div class="progress" id="progress" hidden>
-    <div class="bar"><div class="fill" id="fill"></div></div>
-    <div class="ptext"><span id="pstep"></span><span id="pleft"></span></div>
-  </div>
-  <div class="error" id="error"></div>
-  <div class="log" id="log"></div>
+  <div class="error" id="error" role="alert"></div>
 </main>
+
+<!-- in front of the blurred form while a build runs -->
+<div id="working" hidden>
+  <div class="card" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="wkTitle">
+    <div class="wk">
+      <h2 id="wkTitle"></h2>
+      <div class="sub" id="wkSub"></div>
+      <div class="progress">
+        <div class="bar"><div class="fill" id="fill"></div></div>
+        <div class="ptext"><span><span id="pstep" aria-live="polite"></span><span id="ppct"></span></span><span id="pleft"></span></div>
+      </div>
+    </div>
+    <details id="logBox"><summary>Details</summary><div class="log" id="log"></div></details>
+    <div class="actions">
+      <span class="note">Read in this tab, nothing is uploaded.</span>
+      <span class="spacer"></span>
+      <button id="cancel">Stop</button>
+    </div>
+  </div>
+</div>
 <footer>
   <a href="https://github.com/dreMoment/matsim-agent-viz">Source on GitHub</a>
   <span>Map © OpenStreetMap contributors, OpenFreeMap, Mapterhorn</span>
@@ -356,8 +386,6 @@ function update() {
   const running = !!worker;
   const ready = folder && Object.entries(INPUTS).every(([r, f]) => !f.required || files[r]);
   $("build").disabled = !ready || running || checking;
-  $("build").innerHTML = running ? '<span class="spin"></span>Building…' : "Build and open";
-  $("cancel").hidden = !running;
   $("openLast").hidden = !page || running;
   document.querySelectorAll("#pickDir, #crs, #sample button, #world, #osm, #files button, #openSaved")
     .forEach(el => el.disabled = running);
@@ -380,20 +408,32 @@ function timeLeft(s) {
   if (s < 90) return `about ${Math.round(s / 10) * 10} s left`;
   return `about ${Math.round(s / 60)} min left`;
 }
+// Shows the build card in front of the form, which stays behind it, blurred.
+function showWorking(on) {
+  if (on === !$("working").hidden) return;
+  if (on) { $("logBox").open = false; $("working").querySelector(".wk").after($("logBox")); }
+  $("working").hidden = !on;
+  document.body.classList.toggle("building", on);
+  $("app").inert = on; document.querySelector("footer").inert = on;
+  if (on) $("working").querySelector(".card").focus();  // not Stop: a stray Enter would end the build
+}
 function showProgress(p) {
-  $("progress").hidden = !worker;
   if (!worker) return;
-  if (!p) { $("pstep").textContent = "Starting…"; $("pleft").textContent = ""; $("fill").classList.remove("busy"); $("fill").style.width = "0"; return; }
+  if (!p) { $("pstep").textContent = "Starting…"; $("ppct").textContent = $("pleft").textContent = ""; $("fill").classList.remove("busy"); $("fill").style.width = "0"; return; }
   const reading = !!p.reading;
   $("fill").classList.toggle("busy", !reading);
   if (reading) {
     const pct = Math.floor(p.fraction * 100), elapsed = (performance.now() - started) / 1000;
     const left = p.fraction > 0.03 && elapsed > 3 ? elapsed * (1 - p.fraction) / p.fraction : null;
     $("fill").style.width = pct + "%";
-    $("pstep").textContent = `${p.step} · ${pct}%`;
+    if ($("pstep").textContent !== p.step) $("pstep").textContent = p.step;  // only a new step is announced
+    $("ppct").textContent = ` · ${pct}%`;
     $("pleft").textContent = timeLeft(left);
   } else {
-    $("pstep").textContent = `${p.step}…`;
+    const [head, tail] = p.step.split(": ");  // "Rail tracks: tile 3 of 60": only "Rail tracks" is announced
+    const step = tail ? head : `${head}…`;
+    if ($("pstep").textContent !== step) $("pstep").textContent = step;
+    $("ppct").textContent = tail ? ` · ${tail}…` : "";
     $("pleft").textContent = "";
   }
 }
@@ -401,8 +441,16 @@ function showProgress(p) {
 function stopWorker() {
   worker?.terminate();
   worker = null;
-  showProgress(null);
+  const shown = !$("working").hidden;
+  showWorking(false);
   update();
+  if (shown) $("build").focus();  // focus was in the card, now hidden
+}
+// A failed build: the log stays at hand, under the error.
+function buildFailed(msg) {
+  stopWorker();
+  $("error").textContent = msg;
+  $("error").after($("logBox"));
 }
 
 $("build").onclick = () => {
@@ -418,25 +466,25 @@ $("build").onclick = () => {
   worker = new Worker(shim, { type: "module" });
   setTimeout(() => URL.revokeObjectURL(shim), 10_000);
   started = performance.now();
-  update(); showProgress(null);
+  const share = sample === 1 ? "all agents" : `${sample * 100}% of agents`;
+  $("wkTitle").textContent = opt.world ? "Building the 3D world" : "Building the map";
+  $("wkSub").textContent = `${folder.name} · ${share}${osm ? " · OpenStreetMap paths" : ""}`;
+  update(); showProgress(null); showWorking(true);
   const log = [];
   worker.onmessage = ({ data }) => {
     if (data.log) { log.push(data.log); $("log").textContent = log.join("\n"); $("log").scrollTop = 1e9; return; }
     if (data.progress) { showProgress(data.progress); return; }
-    const secs = ((performance.now() - started) / 1000).toFixed(0);
-    stopWorker();
     if (data.error) {
-      $("error").textContent = data.error;
+      buildFailed(data.error);
       if (data.crs) { $("crsBox").hidden = false; $("crs").focus(); }
       return;
     }
+    stopWorker();
     const blob = data.done.page;
-    log.push(`built in ${secs} s, page ${mb(blob.size)}`);
-    $("log").textContent = log.join("\n");
     setPage(blob, data.done.title + (opt.world ? " · 3D world" : ""), `${slug(data.done.title)}${opt.world ? "_world" : ""}.html`);
     openViewer();
   };
-  worker.onerror = e => { stopWorker(); $("error").textContent = `The build stopped: ${e.message || "unknown error"}. A very large run may need a smaller sample.`; };
+  worker.onerror = e => buildFailed(`The build stopped: ${e.message || "unknown error"}. A very large run may need a smaller sample.`);
   worker.postMessage({ files, entries: folder.entries, opt });
 };
 $("cancel").onclick = () => { stopWorker(); $("error").textContent = "Stopped."; };
