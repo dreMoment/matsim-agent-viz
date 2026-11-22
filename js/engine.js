@@ -12,8 +12,9 @@
 //   * trains and trams: between two stops, along the railway tracks of OpenStreetMap (downloaded from
 //     Overpass by tile, then cached), because their network links are often straight lines;
 //   * walks: along OpenStreetMap footpaths and streets, keeping MATSim's start and end times;
+//   * teleported bikes (bike, PubliBike, ...): the same way, on streets and cycleways, off footways and steps;
 //   * car passengers: the fastest path on the run's car links, like the cars;
-//   * other teleported modes (bike, PubliBike, ...): a straight line from start to end at constant speed;
+//   * other teleported modes: a straight line from start to end at constant speed;
 //   * agents are sampled with a stable hash of the person id.
 //
 // Only tile bounds go out (to Overpass), never run data. Messages are counts only: no ids, coordinates or records.
@@ -899,10 +900,12 @@ async function railTracks(hops, stops, crs, env) {
   return out;
 }
 
-// ---------------------------------------------------------------- footpaths
-// MATSim teleports walkers: it knows only where and when a walk starts and ends. To draw walkers on the
-// street, the tool downloads the walkable ways of OpenStreetMap (footways, pedestrian zones, steps,
-// paths and streets) in small tiles where sampled agents walk, and gives each walk its shortest path.
+// ---------------------------------------------------------------- footpaths and bike paths
+// MATSim teleports walkers, and usually cyclists: it knows only where and when a leg starts and ends. To
+// draw them on the street, the tool downloads the walkable ways of OpenStreetMap (footways, pedestrian
+// zones, steps, paths and streets) in small tiles where sampled agents walk or ride, and gives each leg
+// its shortest path. Bikes use the same tiles; the query also lists the ways closed to bikes (footways,
+// steps and the like, unless signed for bikes), which a bike takes only for a short cut-through.
 // The start and end times stay MATSim's; only the shape changes.
 const WALK_WAYS = "footway|pedestrian|path|steps|living_street|residential|service|unclassified|track|cycleway|" +
   "corridor|platform|tertiary|tertiary_link|secondary|secondary_link|primary|primary_link";
@@ -910,25 +913,33 @@ export const WALK_TILE = 0.05;     // degrees: about 5.5 x 3.8 km in Switzerland
 const MAX_WALK_TILES = 40;  // the tiles with most walks get paths, the other walks stay straight
 const WALK_SNAP_M = 250;    // a walk's start or end looks for a path this close
 const WALK_STEP_M = 25;     // long path segments get extra points this far apart, so start and end snap close
+const MIN_PART_NODES = 200; // walks snap only to connected networks this big (~5 km of path), not to cut-off bits
 const MAX_WALK_M = 5000;    // longer walks stay straight
+const MAX_BIKE_M = 15000;   // longer rides stay straight
+const NO_BIKE_COST = 5;     // cost factor for a bike on a way closed to bikes (pushed, or not at all)
 const WALK_SIMPLIFY_M = 5.0;
+const NO_BIKE_WAYS = "footway|pedestrian|steps|corridor|platform";
 
 export const isWalk = mode => mode.toLowerCase().includes("walk");
+export const isBike = mode => /bike|bicycle|cycl/.test(mode.toLowerCase());
 
 export function walkQuery(i, j) {
   const r = v => Math.round(v * 1e4) / 1e4;
   const s = r(i * WALK_TILE), w = r(j * WALK_TILE), n = r(s + WALK_TILE), e = r(w + WALK_TILE);
   return `[out:json][timeout:240];way["highway"~"^(${WALK_WAYS})$"]["foot"!~"^(no|private)$"]` +
-    `["access"!~"^(no|private)$"](${s},${w},${n},${e})->.w;.w out skel qt;node(w.w);out skel qt;`;
+    `["access"!~"^(no|private)$"](${s},${w},${n},${e})->.w;.w out skel qt;node(w.w);out skel qt;` +
+    `(way.w["highway"~"^(${NO_BIKE_WAYS})$"]["bicycle"!~"^(yes|designated|permissive)$"];` +
+    `way.w["bicycle"~"^(no|dismount|use_sidepath)$"];);out ids qt;`;  // the ways closed to bikes, ids only
 }
 
 export function walkTile(i, j, env) {
   return osmTile("walk", `${i}_${j}`, walkQuery(i, j), "footpaths", env);
 }
 
-/** Walkable ways as an undirected graph in the run's coordinates. */
+/** Walkable ways as two undirected graphs in the run's coordinates: for walkers, and for bikes (ways
+ * closed to bikes cost NO_BIKE_COST times their length). */
 function walkGraph(tiles, crs) {
-  const ids = new Map(), ways = new Map(), x = [], y = [];
+  const ids = new Map(), ways = new Map(), noBike = new Set(), x = [], y = [];
   for (const data of tiles) {
     for (const el of data.elements ?? []) {
       if (el.type === "node") {
@@ -937,11 +948,15 @@ function walkGraph(tiles, crs) {
           const p = crs.fromWgs([el.lon, el.lat]);
           x.push(p[0]); y.push(p[1]);
         }
-      } else if (el.type === "way") ways.set(el.id, el.nodes);
+      } else if (el.type === "way") {
+        if (el.nodes) ways.set(el.id, el.nodes);
+        else noBike.add(el.id);  // listed again without nodes: closed to bikes
+      }
     }
   }
-  const edges = [];  // a, b pairs, flat
-  for (const refs of ways.values()) {
+  const edges = [];  // a, b, closed to bikes (0/1), flat
+  for (const [id, refs] of ways) {
+    const nb = noBike.has(id) ? 1 : 0;
     const r = refs.filter(n => ids.has(n)).map(n => ids.get(n));
     for (let k = 0; k + 1 < r.length; k++) {
       let u = r[k];
@@ -952,30 +967,41 @@ function walkGraph(tiles, crs) {
       for (let s = 1; s <= steps; s++) {  // extra points on long segments, evenly spaced
         const f = s / (steps + 1);
         x.push(x0 + dx * f); y.push(y0 + dy * f);
-        edges.push(u, x.length - 1); u = x.length - 1;
+        edges.push(u, x.length - 1, nb); u = x.length - 1;
       }
-      edges.push(u, v);
+      edges.push(u, v, nb);
     }
   }
-  const g = new Graph(x.length);
-  for (let k = 0; k < edges.length; k += 2) {
-    const a = edges[k], b = edges[k + 1], w = hypot(x[a] - x[b], y[a] - y[b]) + 1e-3;
-    g.add(a, b, w); g.add(b, a, w);
+  const walk = new Graph(x.length), bike = new Graph(x.length);
+  for (let k = 0; k < edges.length; k += 3) {
+    const a = edges[k], b = edges[k + 1], w = hypot(x[a] - x[b], y[a] - y[b]) + 1e-3, wb = edges[k + 2] ? w * NO_BIKE_COST : w;
+    walk.add(a, b, w); walk.add(b, a, w);
+    bike.add(a, b, wb); bike.add(b, a, wb);
   }
-  g.finish();
-  const all = Array.from(x.keys());
-  return { graph: g, X: x, Y: y, index: new PointIndex(x, y, all, 50) };
+  walk.finish(); bike.finish();
+  // A cut-off bit of path (a courtyard footway, a platform, a ramp whose link OSM lacks) has no way out:
+  // a walk snapped to it would stay straight. So legs snap only to nodes of a large connected network.
+  const root = Array.from(x.keys()), find = a => { while (root[a] !== a) a = root[a] = root[root[a]]; return a; };
+  for (let k = 0; k < edges.length; k += 3) {
+    const a = find(edges[k]), b = find(edges[k + 1]);
+    if (a !== b) root[a] = b;
+  }
+  const size = new Map();
+  for (let n = 0; n < x.length; n++) { const r = find(n); size.set(r, (size.get(r) ?? 0) + 1); }
+  const snap = Array.from(x.keys()).filter(n => size.get(find(n)) >= MIN_PART_NODES);
+  return { walk, bike, X: x, Y: y, index: new PointIndex(x, y, snap, 50) };
 }
 
-/** Give the sampled walks a path on OSM footpaths: adds a hop to each walk leg that gets one and
- * returns Map ("walk\0n") -> [[x, y], ...], in run coordinates. */
+/** Give the sampled walks and teleported bike legs a path on OSM footpaths and streets: adds a hop to
+ * each leg that gets one and returns Map ("walk\0n" or "bike\0n") -> [[x, y], ...], in run coordinates. */
 async function walkTracks(legs, crs, env) {
   if (crs.geographic) {
-    env.say("note: the run's coordinates are in degrees, not metres; walkers move in straight lines");
+    env.say("note: the run's coordinates are in degrees, not metres; walkers and bikes move in straight lines");
     return new Map();
   }
-  let walks = legs.filter(l => isWalk(l.mode) && !l.routed && l.pts.length === 2 &&
-    30 < dist(l.pts[0].slice(1), l.pts[1].slice(1)) && dist(l.pts[0].slice(1), l.pts[1].slice(1)) < MAX_WALK_M);
+  const within = (l, max) => !l.routed && l.pts.length === 2 &&
+    30 < dist(l.pts[0].slice(1), l.pts[1].slice(1)) && dist(l.pts[0].slice(1), l.pts[1].slice(1)) < max;
+  let walks = legs.filter(l => (isWalk(l.mode) && within(l, MAX_WALK_M)) || (isBike(l.mode) && !isWalk(l.mode) && within(l, MAX_BIKE_M)));
   if (!walks.length) return new Map();
   const need = [], count = new Map();  // tiles each walk needs: those of its bounding box
   for (const leg of walks) {
@@ -990,21 +1016,26 @@ async function walkTracks(legs, crs, env) {
   const chosen = countTop(count, MAX_WALK_TILES).map(k => k.split("_").map(Number))
     .sort((p, q) => p[0] - q[0] || p[1] - q[1]);
   if (count.size > MAX_WALK_TILES) env.say(`note: the walks cover ${count.size} map tiles; the ${MAX_WALK_TILES} ` +
-    "with most walks get footpaths, walks elsewhere stay straight");
+    "with most walks and rides get paths, the others stay straight");
   const tiles = [], loaded = new Set();
   for (let n = 0; n < chosen.length; n++) {
     const [i, j] = chosen[n];
     env.progress({ step: `Footpaths: tile ${n + 1} of ${chosen.length}` });
     const tile = await walkTile(i, j, env);
-    if (!tile) { env.say("note: walks where footpaths are missing stay straight"); break; }
+    if (!tile) { env.say("note: walks and rides where footpaths are missing stay straight"); break; }
     tiles.push(tile); loaded.add(`${i}_${j}`);
   }
   walks = walks.filter((_, k) => need[k].every(t => loaded.has(t)));
   if (!tiles.length || !walks.length) return new Map();
-  env.progress({ step: "Routing walks on the footpaths" });
-  const { graph, X, Y, index } = walkGraph(tiles, crs);
+  env.progress({ step: "Routing walks and bikes on the footpaths" });
+  const { walk, bike, X, Y, index } = walkGraph(tiles, crs);
   // cost in metres; give up on long detours (e.g. a start snapped to the wrong side of a river)
-  return shortestPaths(walks, graph, X, Y, index, WALK_SNAP_M, beeline => 2.5 * beeline + 500, WALK_SIMPLIFY_M, "walk");
+  const tracks = shortestPaths(walks.filter(l => isWalk(l.mode)), walk, X, Y, index, WALK_SNAP_M,
+    beeline => 2.5 * beeline + 500, WALK_SIMPLIFY_M, "walk");
+  const rides = shortestPaths(walks.filter(l => !isWalk(l.mode)), bike, X, Y, index, WALK_SNAP_M,
+    beeline => 2.5 * beeline + 1000, WALK_SIMPLIFY_M, "bike");
+  for (const [k, v] of rides) tracks.set(k, v);
+  return tracks;
 }
 
 /** A weighted graph in compressed rows (like scipy's csr_matrix). Parallel edges keep the lowest weight. */
@@ -1485,11 +1516,13 @@ export async function build(files, opt, env, entries = []) {
   }
   if (walk) {
     const nWalks = legs.filter(l => isWalk(l.mode)).length;
-    if (nWalks) {
-      env.say(`routing ${nWalks.toLocaleString("en")} walks on OpenStreetMap footpaths ...`);
+    const nRides = legs.filter(l => isBike(l.mode) && !isWalk(l.mode) && !l.routed).length;
+    if (nWalks || nRides) {
+      env.say(`routing ${nWalks.toLocaleString("en")} walks and ${nRides.toLocaleString("en")} teleported bike legs on OpenStreetMap paths ...`);
       const paths = await walkTracks(legs, crs, env);
       for (const [k, v] of paths) tracks.set(k, v);
-      env.say(`  ${paths.size.toLocaleString("en")} of ${nWalks.toLocaleString("en")} walks follow footpaths, the rest go straight`);
+      const n = kind => [...paths.keys()].filter(k => k.startsWith(`${kind}\u0000`)).length.toLocaleString("en");
+      env.say(`  ${n("walk")} of ${nWalks.toLocaleString("en")} walks and ${n("bike")} of ${nRides.toLocaleString("en")} bike legs follow paths, the rest go straight`);
     }
   }
   if (passengers) {

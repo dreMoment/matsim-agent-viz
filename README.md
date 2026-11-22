@@ -24,7 +24,7 @@ The website reads the run in your browser tab. The files are never uploaded: the
 2. Drop the run's folder on the page, or click **Choose folder…**. The outputs may sit up to three folders down, as in `my_run/output/` (`ITERS` and hidden folders are skipped). If the folder holds several runs, the page asks you to choose one. The page lists the input files it found, and you can swap any of them with **Change…**. Firefox and Safari may ask whether to "upload" the files. They are only read in the tab.
 3. Pick the share of agents and, if you like, the **3D world**, then **Build and open**. The page is named after the run folder (`--title` on the command line sets another name). The page opens in the same tab. **← Back** returns to the run, and **Save page** downloads the page as one HTML file you can share. To watch it again, open the site and drop the file on it. The site takes only the data and texts from the file and draws them with its own template, so a page from someone else can't run code there. A saved map page also opens straight from disk in Chrome, but the 3D world doesn't: browsers don't run its workers from a local file. Some viewers (Quick Look, editor previews) block WebGL.
 
-The **Trains and walkers on OpenStreetMap paths** switch turns off the track and footpath downloads. Trains and trams then use the run's own links, and walkers move in straight lines.
+The **Trains, walkers and bikes on OpenStreetMap paths** switch turns off the track and footpath downloads. Trains and trams then use the run's own links, and walkers and bikes move in straight lines.
 
 Reading a full Zurich 10% run (49 M events) takes about 40 s in Chrome. With a 10% sample the page is about 34 MB. The browser remembers only the sample and the switches, not the folder.
 
@@ -46,7 +46,7 @@ node tools/build.mjs path/to/simulation_output --world      # the 3D world, agen
 | `--crs` | from `output_config.xml`, else the network | e.g. `EPSG:2056`, if the run doesn't set one (an LV95/LV03 guess is the fallback) |
 | `--events`, `--network`, `--schedule`, `--config`, `--sharing` | found in the run folder | use a file from somewhere else |
 | `--no-rail` | | trains and trams use the run's own links, no track download |
-| `--no-walk` | | walkers move in straight lines, no footpath download |
+| `--no-walk` | | walkers and teleported bikes move in straight lines, no footpath download |
 | `--no-passenger` | | car passengers move in straight lines |
 
 It caches OpenStreetMap tiles in `~/.cache/matsim-agent-viz`.
@@ -74,14 +74,16 @@ It never reads the population, facilities or households files.
 - **Car and PT**: dots follow the vehicle's link entries and stop events. This includes the SBB deterministic transit engine.
 - **Trains and trams**: their network links are often straight lines from stop to stop (pt2matsim builds rail that way). So between two stops, dots follow the real railway tracks from OpenStreetMap instead. The tool finds the shortest path along the tracks that never turns back at a switch, with trains kept on rail tracks and trams on tram tracks. Routes count as trains when their `transportMode` contains rail, train, subway, metro or S-Bahn, and as trams when it contains tram. The vehicle's route comes from the `TransitDriverStarts` events. If no suitable track is within 300 m of both stops, the dot goes straight, as before.
   - The tracks are downloaded from the Overpass API by 1° tile around the stops that riders used. The site publishes these tiles ready-made for all of Switzerland, so builds there need no download (see [Ready-made tiles](#ready-made-tiles)). Elsewhere, a first build for a whole country takes a few minutes. After that, the tiles come from the browser's cache (clear the site's data to refresh them; `~/.cache/matsim-agent-viz/rail` for the command line). Only the tile bounds go out, no run data.
-  - The **Trains and walkers on OpenStreetMap paths** switch (`--no-rail`) turns this off and skips the download.
+  - The **Trains, walkers and bikes on OpenStreetMap paths** switch (`--no-rail`) turns this off and skips the download.
 - **Other network modes** (DRT, network-routed sharing, freight, …): any agent that enters a vehicle follows that vehicle's link events the same way. Not tested beyond car and PT.
 - **Walks** (any mode with "walk" in its name, e.g. walk, access walks): MATSim teleports them, so it only knows where and when a walk starts and ends. Walkers follow the shortest path on OpenStreetMap footways, pedestrian zones, steps, paths and streets, and keep MATSim's start and end times.
   - The ways are downloaded from the Overpass API in tiles of 0.05° (about 5 × 4 km), only where sampled agents walk. The 40 tiles with the most walks get paths, and walks elsewhere stay straight. So do walks under 30 m or over 5 km, and walks whose start or end is more than 250 m from a path. Tiles are cached like the rail tracks, and the site publishes them ready-made for the Zurich area. Elsewhere, a tile can take a minute or more to download when Overpass is busy, so the first build of a large run can take a while. Only the tile bounds go out, no run data.
+  - A walk that starts or ends on a cut-off bit of path (a courtyard footway, a platform) snaps to the nearest larger connected network instead.
   - Each walk adds its own path to the page, about 300 bytes per walk.
   - The same switch (`--no-walk`) turns this off and skips the download.
+- **Bikes** (teleported modes with "bike", "bicycle" or "cycl" in the name, e.g. bike, PubliBike): they follow the same OpenStreetMap tiles as walks, on streets, paths and cycleways. Footways, steps and pedestrian zones not signed for bikes, and ways tagged `bicycle=no`, count five times their length, so a bike uses them only for a short cut-through. Rides under 30 m or over 15 km stay straight. Bikes that MATSim routes on the network follow their link events like cars. The same switch (`--no-walk`) turns this off.
 - **Car passengers** (modes with "passenger" in the name, or `ride`): MATSim teleports them too. They follow the fastest path on the run's own car links at free-flow speed, keeping MATSim's start and end times, and get trip lines like cars. They get on and off at the nearest node of a road with a speed limit of 60 km/h or less (within 1 km), so never on a motorway. No download. `--no-passenger` turns this off on the command line.
-- **Other teleported modes** (bike, …): dots move in a straight line at constant speed, because MATSim doesn't simulate the path.
+- **Other teleported modes** (`outside`, …): dots move in a straight line at constant speed, because MATSim doesn't simulate the path.
 
 Any mode name works. Common ones (car, pt, bike, walk, and a few from the Swiss eqasim scenarios such as `publibike` and `outside`) have fixed colours. Other modes get colours from a fallback palette, and their names are tidied up for the legend (`e_scooter` → "E scooter"). To give a mode its own colour, add it to `MODE_STYLE` in `page.html`.
 
@@ -143,7 +145,7 @@ With `--osm`, the roads are central Zurich's real streets from OpenStreetMap ins
 - `page.html`: the map template. `__DATA__`, `__TITLE__`, `__EYEBROW__` and `__NOTE__` are filled in by the engine.
 - `world.html`: the 3D world template (three.js, no build step), filled in the same way. A worker inside it builds each map tile.
 - `tools/build.mjs`: the command line build
-- `demo/zurich.json`: the start page's moving background and the **Try a demo** page, a fake run of Zurich (no real data). Remake it with `uv run examples/make_fake_run.py FAKE_RUN --osm`, then `node tools/build.mjs FAKE_RUN --sample 1 --world --json --out demo/zurich.json` (built for the world, which the map page reads too).
+- `demo/zurich.json`: the start page's moving background and the **Try a demo** page, a fake run of Zurich (no real data). Remake it with `uv run examples/make_fake_run.py FAKE_RUN --osm --demo` (no PubliBike or "outside" legs), then `node tools/build.mjs FAKE_RUN --sample 1 --world --json --out demo/zurich.json` (built for the world, which the map page reads too).
 - `demo/zurich.webp`, `demo/zurich@2x.webp`: a still of the background's first frame (07:30, camera not yet turned), shown until the live map is drawn. Take it again with `tools/capture-still.mjs` when the map style or the fake run changes.
 - `logo.svg`: the logo and favicon
 - `vendor/proj4.mjs`: [proj4js](https://github.com/proj4js/proj4js) 2.22.0 (MIT) as one ES module, for coordinate systems

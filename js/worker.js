@@ -6,7 +6,9 @@ import proj4 from "../vendor/proj4.mjs";
 import { build, renderParts, BuildError, CrsError } from "./engine.js";
 
 // OpenStreetMap tiles (public data) stay in the browser's cache storage, so the next build needs no download.
-const CACHE = "matsim-agent-viz-osm-v1";
+// v2: footpath tiles also list the ways closed to bikes, so tiles cached before that are dropped.
+const CACHE = "matsim-agent-viz-osm-v2";
+self.caches?.delete("matsim-agent-viz-osm-v1").catch(() => {});
 const cacheUrl = (kind, key) => new URL(`../osm-cache/${kind}/${key}.json`, import.meta.url).href;
 const cache = {
   async get(kind, key) {
