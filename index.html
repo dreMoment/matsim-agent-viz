@@ -162,7 +162,6 @@
   <div class="files" id="files"></div>
   <input type="file" id="dirInput" webkitdirectory multiple hidden>
   <input type="file" id="fileInput" hidden>
-  <input type="file" id="pageInput" accept=".html,text/html" hidden>
 
   <label class="toggle">
     <input type="checkbox" id="world">
@@ -196,7 +195,6 @@
     <button id="openLast" hidden>Open last page</button>
     <span class="spacer"></span>
     <button class="link" id="openDemo" title="A made-up run of Zurich, for a look at the tool without your own run">Try a demo</button>
-    <button class="link" id="openSaved">Open a saved page…</button>
   </div>
   <div class="error" id="error" role="alert"></div>
 </main>
@@ -382,7 +380,7 @@ function update() {
   const ready = folder && Object.entries(INPUTS).every(([r, f]) => !f.required || files[r]);
   $("build").disabled = !ready || running || checking;
   $("openLast").hidden = !page || running;
-  document.querySelectorAll("#pickDir, #crs, #sample button, #world, #osm, #files button, #openSaved, #openDemo")
+  document.querySelectorAll("#pickDir, #crs, #sample button, #world, #osm, #files button, #openDemo")
     .forEach(el => el.disabled = running);
 }
 
@@ -569,8 +567,6 @@ $("openDemo").onclick = async () => {
     if (seq === openSeq) $("error").textContent = `Could not load the demo (${e.message}). Check the connection and reload the site.`;
   }
 };
-$("openSaved").onclick = () => { $("pageInput").value = ""; $("pageInput").click(); };
-$("pageInput").onchange = () => { const f = $("pageInput").files[0]; if (f) openSaved(f); };
 
 // A saved page may come from anyone, so its own HTML and scripts never run here. Only its data (parsed as JSON)
 // and its texts are taken, and the page is rendered again from this site's template.
