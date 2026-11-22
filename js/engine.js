@@ -46,7 +46,7 @@ export const INPUTS = {
 // ---------------------------------------------------------------- finding the inputs
 // A run folder is a list of {path, file}: path relative to the chosen folder, e.g. "run/output/output_events.xml.gz"
 // (the folder's own name first, as the browser gives it), file a Blob with a name. The outputs may sit in a
-// subfolder (a run folder with its output/ inside): the shallowest folder with an events or network file is used.
+// subfolder (a run folder with its output/ inside): see outputFolder.
 
 /** How deep below the chosen folder the readers look for the outputs (ITERS and hidden folders are skipped). */
 export const MAX_DEPTH = 3;
