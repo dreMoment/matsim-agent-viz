@@ -1,7 +1,7 @@
 # Publishes the site to GitHub Pages, with ready-made OpenStreetMap tiles under osm/ (tools/osm-tiles.mjs),
 # so builds in the regions of tools/osm-regions.json need no Overpass download. The tiles are kept between
-# runs in the Actions cache: a push reuses them, the weekly run refreshes them. A pull request builds the site
-# without deploying it.
+# runs in the Actions cache: a push reuses them, the Monday run refreshes them. The Thursday run keeps the cache
+# in use, since GitHub drops caches unused for 7 days. A pull request builds the site without deploying it.
 name: Deploy site
 
 on:
@@ -9,7 +9,7 @@ on:
     branches: [main]
   pull_request:
   schedule:
-    - cron: "17 3 * * 1"  # Mondays, refresh the tiles
+    - cron: "17 3 * * 1,4"  # Mondays refresh the tiles; Thursdays find them fresh and only keep the cache alive
   workflow_dispatch:
 
 permissions:
@@ -34,24 +34,27 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: osm
-          key: osm-${{ github.run_id }}
+          key: osm-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: osm-
 
-      # A push keeps tiles up to 60 days old, so it deploys fast; the weekly run refreshes tiles older than a week.
-      # A pull request can restore the tiles of main, but its own cache stays on its branch.
+      # A push keeps tiles up to 60 days old, so it deploys fast; the scheduled run refreshes tiles older than
+      # 6 days. A tile whose query changed is always downloaded again. Downloads stop after 120 min, so the
+      # site still deploys when Overpass is slow. A pull request can restore the tiles of main, but its own
+      # cache stays on its branch.
       - name: Download missing or old tiles
-        run: node tools/osm-tiles.mjs --out osm --max-age-days ${{ github.event_name == 'schedule' && 7 || 60 }}
+        id: tiles
+        run: node tools/osm-tiles.mjs --out osm --budget-min 120 --max-age-days ${{ github.event_name == 'schedule' && 6 || 60 }}
 
       - name: Save OpenStreetMap tiles
-        if: always()
+        if: always() && steps.tiles.outputs.changed == 'true'
         uses: actions/cache/save@v4
         with:
           path: osm
-          key: osm-${{ github.run_id }}
+          key: osm-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Assemble the site
         run: |
-          mkdir _site
+          mkdir -p _site osm
           rsync -a --exclude .git --exclude .github --exclude _site ./ _site/
           du -sh _site _site/osm
 

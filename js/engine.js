@@ -694,10 +694,12 @@ const SIDING = 1.3;           // cost factor for sidings: through tracks first
 const MAX_TURN_COS = -0.17;   // no turns sharper than ~100 degrees: a train cannot reverse at a switch
 const SIMPLIFY_M = 3.0;
 
+export const railQuery = (lat, lon) =>
+  `[out:json][timeout:240];way["railway"~"^(${RAIL_TYPES})$"]["service"!~"^(yard|spur)$"]` +
+  `(${lat},${lon},${lat + 1},${lon + 1})->.w;.w out body qt;node(w.w);out skel qt;`;
+
 export function railTile(lat, lon, env) {
-  const query = `[out:json][timeout:240];way["railway"~"^(${RAIL_TYPES})$"]["service"!~"^(yard|spur)$"]` +
-    `(${lat},${lon},${lat + 1},${lon + 1})->.w;.w out body qt;node(w.w);out skel qt;`;
-  return osmTile("rail", `${lat}_${lon}`, query, "rail tracks", env);
+  return osmTile("rail", `${lat}_${lon}`, railQuery(lat, lon), "rail tracks", env);
 }
 
 const compatible = (track, kind) => track === 2 || (track === 1) === (kind === "tram");
@@ -913,12 +915,15 @@ const WALK_SIMPLIFY_M = 5.0;
 
 export const isWalk = mode => mode.toLowerCase().includes("walk");
 
-export function walkTile(i, j, env) {
+export function walkQuery(i, j) {
   const r = v => Math.round(v * 1e4) / 1e4;
   const s = r(i * WALK_TILE), w = r(j * WALK_TILE), n = r(s + WALK_TILE), e = r(w + WALK_TILE);
-  const query = `[out:json][timeout:240];way["highway"~"^(${WALK_WAYS})$"]["foot"!~"^(no|private)$"]` +
+  return `[out:json][timeout:240];way["highway"~"^(${WALK_WAYS})$"]["foot"!~"^(no|private)$"]` +
     `["access"!~"^(no|private)$"](${s},${w},${n},${e})->.w;.w out skel qt;node(w.w);out skel qt;`;
-  return osmTile("walk", `${i}_${j}`, query, "footpaths", env);
+}
+
+export function walkTile(i, j, env) {
+  return osmTile("walk", `${i}_${j}`, walkQuery(i, j), "footpaths", env);
 }
 
 /** Walkable ways as an undirected graph in the run's coordinates. */

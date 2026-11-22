@@ -15,7 +15,7 @@ It can also build a second kind of page: a 3D world you can explore, with cars, 
 The website reads the run in your browser tab. The files are never uploaded: the site is a set of static files on GitHub Pages, with no server that could receive them.
 
 - The build runs in the tab, in JavaScript (`js/engine.js`). It reads only the events, network, transit schedule, config and bike-sharing station files. It never reads the population, facilities or households files.
-- What leaves your computer: map tiles (OpenFreeMap, Mapterhorn), fonts and the map and 3D libraries. For trains and walkers, OpenStreetMap tracks and footpaths are downloaded from the Overpass API by tile, and only the tile bounds go out. A coordinate-system code the tool doesn't know is looked up on epsg.io; only the code goes out.
+- What leaves your computer: map tiles (OpenFreeMap, Mapterhorn), fonts and the map and 3D libraries. For trains and walkers, OpenStreetMap tracks and footpaths come by tile from the site itself ([ready-made tiles](#ready-made-tiles)) or else from the Overpass API, and only the tile bounds go out. A coordinate-system code the tool doesn't know is looked up on epsg.io; only the code goes out.
 - Each page has a Content-Security-Policy that lists these hosts and blocks all others. So even a bug can't send your data anywhere else. You can check it in your browser's developer tools (Network tab), or read the policy at the top of `index.html`.
 
 ## Usage
@@ -154,7 +154,7 @@ No build step: the files are served as they are. The `Deploy site` workflow (`.g
 
 Downloading tracks and footpaths from Overpass is the slow part of a first build. So the site also publishes them, as gzipped JSON under `osm/rail/` and `osm/walk/`, for the areas in `tools/osm-regions.json`: rail tracks for all of Switzerland, footpaths for the Zurich area. The page looks for a tile in the browser's cache, then on the site, and only then asks Overpass. The site is the same origin as the page, so no new host is involved. It's public OpenStreetMap data, no run data.
 
-The workflow downloads the tiles with `node tools/osm-tiles.mjs` (the engine's own queries), keeps them in the Actions cache, and refreshes them every Monday. To cover another area, add a box to `tools/osm-regions.json`; a footpath tile is up to about 1.5 MB, a rail tile about 2 MB. `osm/` is not committed. Locally, the site works without it and falls back to Overpass.
+The workflow downloads the tiles with `node tools/osm-tiles.mjs` (the engine's own queries), keeps them in the Actions cache, and refreshes them every Monday. A tile whose query changes in the engine is downloaded again on the next run. To cover another area, add a box to `tools/osm-regions.json`; a footpath tile is up to about 1.5 MB, a rail tile about 2 MB. `osm/` is not committed. Locally, the site works without it and falls back to Overpass.
 
 ## License
 
