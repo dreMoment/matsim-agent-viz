@@ -93,12 +93,14 @@
   .error:empty { display: none; }
   /* while a build runs: the form stays behind, blurred, with the build card in front */
   main, footer { transition: filter .3s ease, opacity .3s ease; }
-  body.building main, body.building footer { filter: blur(4px); opacity: .8; pointer-events: none; user-select: none; }
+  body.building main, body.building footer { filter: blur(4px); opacity: .8; }
   #working { position: fixed; inset: 0; z-index: 5; display: grid; place-items: center; padding: 16px; }
   #working[hidden] { display: none; }
   #working .card { width: min(440px, 100%); padding: 22px 24px 18px; background: var(--card); border: 1px solid var(--line);
     border-radius: 14px; box-shadow: 0 18px 48px rgba(0,0,0,.14); animation: rise .3s ease; }
   @keyframes rise { from { opacity: 0; transform: translateY(8px) scale(.98); } }
+  #working .card:focus { outline: none; }
+  @media (prefers-reduced-motion: reduce) { #working .card { animation: none; } main, footer { transition: none; } }
   #working .actions { margin-top: 18px; padding-top: 14px; }
   .wk h2 { font-size: 17px; font-weight: 650; letter-spacing: -.01em; margin: 0 0 2px; }
   .wk .sub { color: var(--muted); }
@@ -200,13 +202,13 @@
 
 <!-- in front of the blurred form while a build runs -->
 <div id="working" hidden>
-  <div class="card" role="dialog" aria-modal="true" aria-labelledby="wkTitle">
+  <div class="card" tabindex="-1" role="dialog" aria-modal="true" aria-labelledby="wkTitle">
     <div class="wk">
       <h2 id="wkTitle"></h2>
       <div class="sub" id="wkSub"></div>
       <div class="progress">
         <div class="bar"><div class="fill" id="fill"></div></div>
-        <div class="ptext"><span id="pstep"></span><span id="pleft"></span></div>
+        <div class="ptext"><span id="pstep" aria-live="polite"></span><span id="pleft"></span></div>
       </div>
     </div>
     <details id="logBox"><summary>Details</summary><div class="log" id="log"></div></details>
@@ -412,8 +414,8 @@ function showWorking(on) {
   if (on) { $("logBox").open = false; $("working").querySelector(".wk").after($("logBox")); }
   $("working").hidden = !on;
   document.body.classList.toggle("building", on);
-  $("app").inert = on;
-  if (on) $("cancel").focus();
+  $("app").inert = on; document.querySelector("footer").inert = on;
+  if (on) $("working").querySelector(".card").focus();  // not Stop: a stray Enter would end the build
 }
 function showProgress(p) {
   if (!worker) return;
@@ -435,8 +437,16 @@ function showProgress(p) {
 function stopWorker() {
   worker?.terminate();
   worker = null;
+  const shown = !$("working").hidden;
   showWorking(false);
   update();
+  if (shown) $("build").focus();  // focus was in the card, now hidden
+}
+// A failed build: the log stays at hand, under the error.
+function buildFailed(msg) {
+  stopWorker();
+  $("error").textContent = msg;
+  $("error").after($("logBox"));
 }
 
 $("build").onclick = () => {
@@ -460,21 +470,17 @@ $("build").onclick = () => {
   worker.onmessage = ({ data }) => {
     if (data.log) { log.push(data.log); $("log").textContent = log.join("\n"); $("log").scrollTop = 1e9; return; }
     if (data.progress) { showProgress(data.progress); return; }
-    const secs = ((performance.now() - started) / 1000).toFixed(0);
-    stopWorker();
     if (data.error) {
-      $("error").textContent = data.error;
-      $("error").after($("logBox"));  // the log stays at hand, under the error
+      buildFailed(data.error);
       if (data.crs) { $("crsBox").hidden = false; $("crs").focus(); }
       return;
     }
+    stopWorker();
     const blob = data.done.page;
-    log.push(`built in ${secs} s, page ${mb(blob.size)}`);
-    $("log").textContent = log.join("\n");
     setPage(blob, data.done.title + (opt.world ? " · 3D world" : ""), `${slug(data.done.title)}${opt.world ? "_world" : ""}.html`);
     openViewer();
   };
-  worker.onerror = e => { stopWorker(); $("error").textContent = `The build stopped: ${e.message || "unknown error"}. A very large run may need a smaller sample.`; };
+  worker.onerror = e => buildFailed(`The build stopped: ${e.message || "unknown error"}. A very large run may need a smaller sample.`);
   worker.postMessage({ files, entries: folder.entries, opt });
 };
 $("cancel").onclick = () => { stopWorker(); $("error").textContent = "Stopped."; };
