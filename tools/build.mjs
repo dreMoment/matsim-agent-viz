@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import proj4 from "../vendor/proj4.mjs";
-import { build, renderParts, findInputs, sharingFor, readConfig, BuildError, INPUTS } from "../js/engine.js";
+import { build, renderParts, findInputs, sharingFor, readConfig, outputFolder, MAX_DEPTH, skipFolder, BuildError, INPUTS } from "../js/engine.js";
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const USAGE = "usage: node tools/build.mjs RUN_FOLDER [--world] [--out FILE] [--sample 0.1] [--title TEXT] [--crs CRS]\n" +
@@ -50,18 +50,18 @@ const asFile = async p => new File([await openAsBlob(p)], path.basename(p));
 
 const kindOf = async p => { const st = await fs.stat(p).catch(() => null); return st?.isFile() ? "file" : st?.isDirectory() ? "dir" : null; };
 
-/** The folder as the browser sees it: [{path: "folder/name", file}], the top level and one level below.
- * Follows symbolic links. */
+/** The folder as the browser sees it: [{path: "folder/name", file}], the top level and up to MAX_DEPTH folders
+ * below. Follows symbolic links. */
 async function listFolder(dir) {
-  const base = path.basename(path.resolve(dir)), out = [];
-  for (const name of await fs.readdir(dir)) {
-    const p = path.join(dir, name), kind = await kindOf(p);
-    if (kind === "file") out.push({ path: `${base}/${name}`, file: await asFile(p) });
-    else if (kind === "dir" && name !== "ITERS") {
-      for (const sub of await fs.readdir(p).catch(() => []))
-        if (await kindOf(path.join(p, sub)) === "file") out.push({ path: `${base}/${name}/${sub}`, file: await asFile(path.join(p, sub)) });
+  const out = [];
+  const walk = async (d, rel, depth) => {
+    for (const name of await fs.readdir(d).catch(() => [])) {
+      const p = path.join(d, name), kind = await kindOf(p);
+      if (kind === "file") out.push({ path: `${rel}/${name}`, file: await asFile(p) });
+      else if (kind === "dir" && depth < MAX_DEPTH && !skipFolder(name)) await walk(p, `${rel}/${name}`, depth + 1);
     }
-  }
+  };
+  await walk(dir, path.basename(path.resolve(dir)), 0);
   return out;
 }
 
@@ -106,12 +106,14 @@ try {
   if (!(await fs.stat(opt.dir).catch(() => null))?.isDirectory()) die(`ERROR: run folder ${opt.dir} not found.`);
   const entries = await listFolder(opt.dir);
   const files = await findInputs(entries);
+  const outDir = outputFolder(entries);  // where the outputs are
+  const runDir = outDir ? path.join(path.dirname(path.resolve(opt.dir)), outDir) : path.resolve(opt.dir);
   for (const [role, p] of Object.entries(opt.files)) {
     if (!(await fs.stat(p).catch(() => null))?.isFile()) die(`ERROR: ${p} not found.`);
     files[role] = await asFile(p);
   }
   if (files.config && !opt.files.sharing) {  // the places the Python tool looked first, then anywhere in the run folder
-    files.sharing = await sharingNearby(opt.dir, files.config, opt.files.config)
+    files.sharing = await sharingNearby(runDir, files.config, opt.files.config)
       ?? (opt.files.config ? await sharingFor(entries, files.config) : files.sharing);
   }
   // Overpass refuses Node's default User-Agent. (Browsers send their own and must not set one: that needs a preflight.)

@@ -44,27 +44,70 @@ export const INPUTS = {
 };
 
 // ---------------------------------------------------------------- finding the inputs
-// A run folder is a list of {path, file}: path relative to the chosen folder, e.g. "output/output_events.xml.gz"
-// (the folder's own name first, as the browser gives it), file a Blob with a name.
+// A run folder is a list of {path, file}: path relative to the chosen folder, e.g. "run/output/output_events.xml.gz"
+// (the folder's own name first, as the browser gives it), file a Blob with a name. The outputs may sit in a
+// subfolder (a run folder with its output/ inside): see outputFolder.
 
-const topLevel = entries => entries.filter(e => e.path.split("/").length === 2);
+/** How deep below the chosen folder the readers look for the outputs (ITERS and hidden folders are skipped). */
+export const MAX_DEPTH = 3;
+export const skipFolder = name => name === "ITERS" || name.startsWith(".");
 
-/** <name>.gz or <name> in the folder (also with a run-id prefix), or null. */
-export function locate(entries, name) {
-  const top = topLevel(entries);
+const dirOf = p => { const i = p.lastIndexOf("/"); return i < 0 ? "" : p.slice(0, i); };
+
+/** The entries grouped by folder: Map(folder path -> entries), built once per entries list. */
+const folderCache = new WeakMap();
+function byFolder(entries) {
+  let m = folderCache.get(entries);
+  if (!m) {
+    m = new Map();
+    for (const e of entries) {
+      const d = dirOf(e.path);
+      if (!m.has(d)) m.set(d, []);
+      m.get(d).push(e);
+    }
+    folderCache.set(entries, m);
+  }
+  return m;
+}
+const inDir = (entries, dir) => byFolder(entries).get(dir) ?? [];
+
+/** <name>.gz or <name> in the folder dir (also with a run-id prefix), or null. */
+function locateIn(entries, name, dir) {
+  const here = inDir(entries, dir);
   for (const cand of [`${name}.gz`, name]) {
-    const hit = top.find(e => e.file.name === cand);
+    const hit = here.find(e => e.file.name === cand);
     if (hit) return hit.file;
   }
-  const byName = suffix => top.filter(e => e.file.name.endsWith(suffix) && e.file.name.length > suffix.length)
+  const byName = suffix => here.filter(e => e.file.name.endsWith(suffix) && e.file.name.length > suffix.length)
     .map(e => e.file).sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   return byName(`.${name}.gz`)[0] ?? byName(`.${name}`)[0] ?? null;
 }
 
+/** The folder (path as in entries) that holds the run's outputs: the shallowest folder with an events file (the
+ * chosen folder itself if it has one), else the shallowest with a network file. Several at that depth: a
+ * BuildError naming them. */
+export function outputFolder(entries) {
+  const root = entries[0] ? entries[0].path.split("/")[0] : "";
+  const dirs = [...byFolder(entries).keys()];
+  for (const role of ["events", "network"]) {
+    const has = dirs.filter(d => locateIn(entries, INPUTS[role].name, d));
+    if (!has.length) continue;
+    const depth = d => d.split("/").length;
+    const min = Math.min(...has.map(depth));
+    const top = has.filter(d => depth(d) === min).sort();
+    if (top.length > 1) {
+      const names = top.map(d => d.split("/").slice(1).join("/"));
+      fail(`This folder holds ${top.length} runs (${names.slice(0, 4).join(", ")}${top.length > 4 ? ", …" : ""}). Choose one of them.`);
+    }
+    return top[0];
+  }
+  return root;
+}
+
 /** Which inputs the folder has: {role: File or null}. */
 export async function findInputs(entries) {
-  const files = {};
-  for (const [role, { name }] of Object.entries(INPUTS)) if (role !== "sharing") files[role] = locate(entries, name);
+  const dir = outputFolder(entries), files = {};
+  for (const [role, { name }] of Object.entries(INPUTS)) if (role !== "sharing") files[role] = locateIn(entries, name, dir);
   files.sharing = await sharingFor(entries, files.config);
   return files;
 }
@@ -83,17 +126,32 @@ export async function sharingFor(entries, config) {
 
 const stationServices = cfg => cfg.services.filter(s => (s.serviceScheme ?? "").toLowerCase() !== "freefloating");
 
+/** base + "/" + rel with "." and ".." resolved, or null if rel climbs above base's first folder. */
+function joinPath(base, rel) {
+  const out = base.split("/");
+  for (const part of rel.split("/")) {
+    if (part === "..") { if (out.length <= 1) return null; out.pop(); }
+    else if (part && part !== ".") out.push(part);
+  }
+  return out.join("/");
+}
+
 /** Where a service's file is. The path is relative to the original config, which is not in the output
- * folder, so it is looked up in the run folder by its path, then by its name anywhere in the folder. */
+ * folder (usually the folder above it), so it is looked up by its path from the output folder, the folder above
+ * and the chosen folder, then by its name in the output folder, then anywhere. */
 function serviceFile(entries, svc) {
   const p = (svc.serviceInputFile ?? "").replace(/\\/g, "/");
   const name = p.split("/").pop();
   if (!name) return null;
-  const rel = p.replace(/^(\.\/)+/, "");
-  const inRun = entries.find(e => e.path.split("/").slice(1).join("/") === rel);
-  if (inRun) return inRun.file;
-  const top = topLevel(entries).find(e => e.file.name === name);
-  if (top) return top.file;
+  const out = outputFolder(entries), root = out.split("/")[0];
+  const bases = [...new Set([out, dirOf(out), root].filter(Boolean))];
+  for (const b of bases) {
+    const want = joinPath(b, p);
+    const hit = want && entries.find(e => e.path === want);
+    if (hit) return hit.file;
+  }
+  const here = inDir(entries, out).find(e => e.file.name === name);
+  if (here) return here.file;
   return entries.find(e => e.file.name === name)?.file ?? null;
 }
 
