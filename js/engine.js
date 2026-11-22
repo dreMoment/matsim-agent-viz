@@ -23,6 +23,7 @@
 //   say(text)                              a log line
 //   progress({step, fraction, reading})    how far the build is
 //   cache: {get(kind, key), put(kind, key, text)}   OpenStreetMap tiles (public data), may be missing
+//   shared: {get(kind, key)}               ready-made tiles published with the site (tools/osm-tiles.mjs), may be missing
 //   fetch                                  for Overpass and epsg.io
 
 export const MIN_POINT_GAP_S = 10;  // thin out link events closer together than this ...
@@ -649,6 +650,10 @@ async function osmTile(kind, key, query, what, env) {
   if (cached) {
     try { return JSON.parse(cached); } catch { /* broken cache entry: download again */ }
   }
+  const shared = await env.shared?.get(kind, key).catch(() => null);
+  if (shared) {
+    try { return JSON.parse(shared); } catch { /* broken file: ask Overpass */ }
+  }
   let raw = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
@@ -689,7 +694,7 @@ const SIDING = 1.3;           // cost factor for sidings: through tracks first
 const MAX_TURN_COS = -0.17;   // no turns sharper than ~100 degrees: a train cannot reverse at a switch
 const SIMPLIFY_M = 3.0;
 
-function railTile(lat, lon, env) {
+export function railTile(lat, lon, env) {
   const query = `[out:json][timeout:240];way["railway"~"^(${RAIL_TYPES})$"]["service"!~"^(yard|spur)$"]` +
     `(${lat},${lon},${lat + 1},${lon + 1})->.w;.w out body qt;node(w.w);out skel qt;`;
   return osmTile("rail", `${lat}_${lon}`, query, "rail tracks", env);
@@ -899,7 +904,7 @@ async function railTracks(hops, stops, crs, env) {
 // The start and end times stay MATSim's; only the shape changes.
 const WALK_WAYS = "footway|pedestrian|path|steps|living_street|residential|service|unclassified|track|cycleway|" +
   "corridor|platform|tertiary|tertiary_link|secondary|secondary_link|primary|primary_link";
-const WALK_TILE = 0.05;     // degrees: about 5.5 x 3.8 km in Switzerland
+export const WALK_TILE = 0.05;     // degrees: about 5.5 x 3.8 km in Switzerland
 const MAX_WALK_TILES = 40;  // the tiles with most walks get paths, the other walks stay straight
 const WALK_SNAP_M = 250;    // a walk's start or end looks for a path this close
 const WALK_STEP_M = 25;     // long path segments get extra points this far apart, so start and end snap close
@@ -908,7 +913,7 @@ const WALK_SIMPLIFY_M = 5.0;
 
 export const isWalk = mode => mode.toLowerCase().includes("walk");
 
-function walkTile(i, j, env) {
+export function walkTile(i, j, env) {
   const r = v => Math.round(v * 1e4) / 1e4;
   const s = r(i * WALK_TILE), w = r(j * WALK_TILE), n = r(s + WALK_TILE), e = r(w + WALK_TILE);
   const query = `[out:json][timeout:240];way["highway"~"^(${WALK_WAYS})$"]["foot"!~"^(no|private)$"]` +

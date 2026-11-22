@@ -73,11 +73,11 @@ It never reads the population, facilities or households files.
 
 - **Car and PT**: dots follow the vehicle's link entries and stop events. This includes the SBB deterministic transit engine.
 - **Trains and trams**: their network links are often straight lines from stop to stop (pt2matsim builds rail that way). So between two stops, dots follow the real railway tracks from OpenStreetMap instead. The tool finds the shortest path along the tracks that never turns back at a switch, with trains kept on rail tracks and trams on tram tracks. Routes count as trains when their `transportMode` contains rail, train, subway, metro or S-Bahn, and as trams when it contains tram. The vehicle's route comes from the `TransitDriverStarts` events. If no suitable track is within 300 m of both stops, the dot goes straight, as before.
-  - The tracks are downloaded from the Overpass API by 1° tile around the stops that riders used. A first build for all of Switzerland takes a few minutes. After that, the tiles come from the browser's cache (clear the site's data to refresh them; `~/.cache/matsim-agent-viz/rail` for the command line). Only the tile bounds go out, no run data.
+  - The tracks are downloaded from the Overpass API by 1° tile around the stops that riders used. The site publishes these tiles ready-made for all of Switzerland, so builds there need no download (see [Ready-made tiles](#ready-made-tiles)). Elsewhere, a first build for a whole country takes a few minutes. After that, the tiles come from the browser's cache (clear the site's data to refresh them; `~/.cache/matsim-agent-viz/rail` for the command line). Only the tile bounds go out, no run data.
   - The **Trains and walkers on OpenStreetMap paths** switch (`--no-rail`) turns this off and skips the download.
 - **Other network modes** (DRT, network-routed sharing, freight, …): any agent that enters a vehicle follows that vehicle's link events the same way. Not tested beyond car and PT.
 - **Walks** (any mode with "walk" in its name, e.g. walk, access walks): MATSim teleports them, so it only knows where and when a walk starts and ends. Walkers follow the shortest path on OpenStreetMap footways, pedestrian zones, steps, paths and streets, and keep MATSim's start and end times.
-  - The ways are downloaded from the Overpass API in tiles of 0.05° (about 5 × 4 km), only where sampled agents walk. The 40 tiles with the most walks get paths, and walks elsewhere stay straight. So do walks under 30 m or over 5 km, and walks whose start or end is more than 250 m from a path. Tiles are cached like the rail tracks. A tile can take a minute or more to download when Overpass is busy, so the first build of a large run can take a while. Only the tile bounds go out, no run data.
+  - The ways are downloaded from the Overpass API in tiles of 0.05° (about 5 × 4 km), only where sampled agents walk. The 40 tiles with the most walks get paths, and walks elsewhere stay straight. So do walks under 30 m or over 5 km, and walks whose start or end is more than 250 m from a path. Tiles are cached like the rail tracks, and the site publishes them ready-made for the Zurich area. Elsewhere, a tile can take a minute or more to download when Overpass is busy, so the first build of a large run can take a while. Only the tile bounds go out, no run data.
   - Each walk adds its own path to the page, about 300 bytes per walk.
   - The same switch (`--no-walk`) turns this off and skips the download.
 - **Car passengers** (modes with "passenger" in the name, or `ride`): MATSim teleports them too. They follow the fastest path on the run's own car links at free-flow speed, keeping MATSim's start and end times, and get trip lines like cars. They get on and off at the nearest node of a road with a speed limit of 60 km/h or less (within 1 km), so never on a motorway. No download. `--no-passenger` turns this off on the command line.
@@ -139,6 +139,7 @@ With `--osm`, the roads are central Zurich's real streets from OpenStreetMap ins
 - `index.html`: the website's start page (folder and file picker, build progress, the page viewer)
 - `js/engine.js`: reads the run and builds the page data, in the browser and in Node
 - `js/worker.js`: runs the engine in the background in the browser, and caches OpenStreetMap tiles
+- `tools/osm-tiles.mjs`, `tools/osm-regions.json`: download the ready-made OpenStreetMap tiles the site publishes (see below)
 - `page.html`: the map template. `__DATA__`, `__TITLE__`, `__EYEBROW__` and `__NOTE__` are filled in by the engine.
 - `world.html`: the 3D world template (three.js, no build step), filled in the same way. A worker inside it builds each map tile.
 - `tools/build.mjs`: the command line build
@@ -147,7 +148,13 @@ With `--osm`, the roads are central Zurich's real streets from OpenStreetMap ins
 - `logo.svg`: the logo and favicon
 - `vendor/proj4.mjs`: [proj4js](https://github.com/proj4js/proj4js) 2.22.0 (MIT) as one ES module, for coordinate systems
 
-No build step: the files are served as they are. GitHub Pages publishes the `main` branch.
+No build step: the files are served as they are. The `Deploy site` workflow (`.github/workflows/pages.yml`) publishes the `main` branch to GitHub Pages, together with the ready-made tiles.
+
+### Ready-made tiles
+
+Downloading tracks and footpaths from Overpass is the slow part of a first build. So the site also publishes them, as gzipped JSON under `osm/rail/` and `osm/walk/`, for the areas in `tools/osm-regions.json`: rail tracks for all of Switzerland, footpaths for the Zurich area. The page looks for a tile in the browser's cache, then on the site, and only then asks Overpass. The site is the same origin as the page, so no new host is involved. It's public OpenStreetMap data, no run data.
+
+The workflow downloads the tiles with `node tools/osm-tiles.mjs` (the engine's own queries), keeps them in the Actions cache, and refreshes them every Monday. To cover another area, add a box to `tools/osm-regions.json`; a footpath tile is up to about 1.5 MB, a rail tile about 2 MB. `osm/` is not committed. Locally, the site works without it and falls back to Overpass.
 
 ## License
 

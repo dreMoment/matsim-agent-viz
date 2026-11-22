@@ -18,11 +18,24 @@ const cache = {
   },
 };
 
+// Ready-made tiles the site publishes under osm/ (tools/osm-tiles.mjs, refreshed weekly), gzipped JSON.
+// Same origin, so no new host: a region the site covers needs no Overpass download at all.
+const shared = {
+  async get(kind, key) {
+    const r = await fetch(new URL(`../osm/${kind}/${key}.json.gz`, import.meta.url));
+    if (!r.ok) return null;
+    const bytes = new Uint8Array(await r.arrayBuffer());
+    if (bytes[0] !== 0x1f || bytes[1] !== 0x8b) return new TextDecoder().decode(bytes);  // already unzipped by the server
+    return new Response(new Blob([bytes]).stream().pipeThrough(new DecompressionStream("gzip"))).text();
+  },
+};
+
 let lastProgress = 0;
 const env = {
   proj4,
   fetch: (...a) => fetch(...a),
   cache: self.caches ? cache : null,
+  shared,
   say: text => postMessage({ log: text }),
   progress: p => {  // at most a few updates a second
     const now = performance.now();

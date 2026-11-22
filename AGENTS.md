@@ -11,6 +11,7 @@ Real MATSim runs hold synthetic-population data that may be protected. Before to
 - Log output stays at counts: no person ids, coordinates or records.
 - The run must never leave the user's browser. Don't add a backend, analytics or any request that carries run data. Every host the pages may reach is listed in the Content-Security-Policy at the top of `index.html`, `page.html` and `world.html`; keep the three in step, and add a host only for public data (tiles, libraries, OpenStreetMap).
 - Never commit run data or generated pages (`*.html` other than `index.html`, `page.html` and `world.html`; see .gitignore).
+- `osm/` (ready-made OpenStreetMap tiles the site publishes) holds only what `tools/osm-tiles.mjs` downloads for the boxes in `tools/osm-regions.json`. Never derive its regions or tiles from a run. It is built in CI, not committed.
 - `demo/zurich.json` (the start page's background) must stay fake: make it only from `examples/make_fake_run.py --osm` (see README.md, Files).
 
 ## Checking changes

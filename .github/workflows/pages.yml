@@ -1,0 +1,65 @@
+# Publishes the site to GitHub Pages, with ready-made OpenStreetMap tiles under osm/ (tools/osm-tiles.mjs),
+# so builds in the regions of tools/osm-regions.json need no Overpass download. The tiles are kept between
+# runs in the Actions cache: a push reuses them, the weekly run refreshes them.
+name: Deploy site
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * 1"  # Mondays, refresh the tiles
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Restore OpenStreetMap tiles
+        uses: actions/cache/restore@v4
+        with:
+          path: osm
+          key: osm-${{ github.run_id }}
+          restore-keys: osm-
+
+      # A push keeps tiles up to 60 days old, so it deploys fast; the weekly run refreshes tiles older than a week.
+      - name: Download missing or old tiles
+        run: node tools/osm-tiles.mjs --out osm --max-age-days ${{ github.event_name == 'push' && 60 || 7 }}
+
+      - name: Save OpenStreetMap tiles
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: osm
+          key: osm-${{ github.run_id }}
+
+      - name: Assemble the site
+        run: |
+          mkdir _site
+          rsync -a --exclude .git --exclude .github --exclude _site ./ _site/
+          du -sh _site _site/osm
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

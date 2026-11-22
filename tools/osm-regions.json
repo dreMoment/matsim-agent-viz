@@ -1,0 +1,9 @@
+{
+  "_about": "Areas whose OpenStreetMap tiles the site publishes ready-made under osm/ (tools/osm-tiles.mjs). Boxes are [south, west, north, east] in degrees. Rail tiles are 1 degree, footpath tiles 0.05 degree (about 60 tiles for the Zurich box).",
+  "rail": {
+    "Switzerland": [45.8, 5.9, 47.85, 10.5]
+  },
+  "walk": {
+    "Zurich": [47.25, 8.35, 47.55, 8.75]
+  }
+}
