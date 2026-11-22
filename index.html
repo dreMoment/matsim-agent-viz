@@ -155,7 +155,7 @@
 
   <label class="h">Run folder</label>
   <div class="drop" id="drop">
-    <div id="dropText">Drop the run's output folder here</div>
+    <div id="dropText">Drop the run's folder here</div>
     <div class="row"><button id="pickDir">Choose folder…</button></div>
     <div class="hint" id="pickHint"></div>
   </div>
@@ -234,7 +234,7 @@
 </div>
 
 <script type="module">
-import { INPUTS, findInputs, sharingFor, renderParts, BuildError } from "./js/engine.js";
+import { INPUTS, MAX_DEPTH, skipFolder, findInputs, sharingFor, renderParts, BuildError } from "./js/engine.js";
 
 const $ = id => document.getElementById(id);
 const ROLE_LABEL = { events: "Events", network: "Network", schedule: "Transit schedule", config: "Config", sharing: "Sharing stations" };
@@ -261,29 +261,25 @@ const store = {
   set(v) { try { localStorage.setItem("matsim-agent-viz", JSON.stringify({ ...store.get(), ...v })); } catch { /* private mode */ } },
 };
 
-// ---- reading the chosen folder: its files and those one level below (not ITERS, which holds every iteration)
+// ---- reading the chosen folder: its files and those up to MAX_DEPTH folders below, as the outputs may sit in a
+// subfolder such as output/ (not ITERS, which holds every iteration, nor hidden folders)
 const skipErrors = async (fn, fallback) => { try { return await fn(); } catch { return fallback; } };  // an unreadable file or folder is left out
 async function fromHandle(dir) {
   const entries = [];
-  for await (const h of dir.values()) {
-    if (h.kind === "file") { const f = await skipErrors(() => h.getFile()); if (f) entries.push({ path: `${dir.name}/${h.name}`, file: f }); }
-    else if (h.name !== "ITERS") {
-      await skipErrors(async () => {
-        for await (const g of h.values()) {
-          if (g.kind !== "file") continue;
-          const f = await skipErrors(() => g.getFile());
-          if (f) entries.push({ path: `${dir.name}/${h.name}/${g.name}`, file: f });
-        }
-      });
+  const walk = async (h, path, depth) => {
+    for await (const c of h.values()) {
+      if (c.kind === "file") { const f = await skipErrors(() => c.getFile()); if (f) entries.push({ path: `${path}/${c.name}`, file: f }); }
+      else if (depth < MAX_DEPTH && !skipFolder(c.name)) await skipErrors(() => walk(c, `${path}/${c.name}`, depth + 1));
     }
-  }
+  };
+  await walk(dir, dir.name, 0);
   return { name: dir.name, entries };
 }
 function fromInput(list) {
   const entries = [];
   for (const f of list) {
-    const parts = f.webkitRelativePath.split("/");
-    if (parts.length <= 3 && parts[1] !== "ITERS") entries.push({ path: f.webkitRelativePath, file: f });
+    const parts = f.webkitRelativePath.split("/"), folders = parts.slice(1, -1);
+    if (folders.length <= MAX_DEPTH && !folders.some(skipFolder)) entries.push({ path: f.webkitRelativePath, file: f });
   }
   return { name: list[0]?.webkitRelativePath.split("/")[0] ?? "", entries };
 }
@@ -297,15 +293,13 @@ function readEntries(dirEntry) {  // drag and drop: all entries of a directory (
 const entryFile = e => new Promise((resolve, reject) => e.file(resolve, reject));
 async function fromDrop(dir) {
   const entries = [];
-  for (const e of await readEntries(dir)) {
-    if (e.isFile) { const f = await skipErrors(() => entryFile(e)); if (f) entries.push({ path: `${dir.name}/${e.name}`, file: f }); }
-    else if (e.isDirectory && e.name !== "ITERS") {
-      for (const g of await skipErrors(() => readEntries(e), [])) {
-        const f = g.isFile && await skipErrors(() => entryFile(g));
-        if (f) entries.push({ path: `${dir.name}/${e.name}/${g.name}`, file: f });
-      }
+  const walk = async (d, path, depth) => {
+    for (const e of await skipErrors(() => readEntries(d), [])) {
+      if (e.isFile) { const f = await skipErrors(() => entryFile(e)); if (f) entries.push({ path: `${path}/${e.name}`, file: f }); }
+      else if (e.isDirectory && depth < MAX_DEPTH && !skipFolder(e.name)) await walk(e, `${path}/${e.name}`, depth + 1);
     }
-  }
+  };
+  await walk(dir, dir.name, 0);
   return { name: dir.name, entries };
 }
 
@@ -329,11 +323,11 @@ async function openFolder(read) {
     renderFiles();
     await refreshFromConfig();
     if (seq !== pickSeq) return;
-    if (!files.events && !files.network) $("error").textContent = "No MATSim output files in this folder. Choose the run's output folder (the one with output_events.xml.gz).";
+    if (!files.events && !files.network) $("error").textContent = "No MATSim output files in this folder or the folders below it. Choose the run's folder (the one with output_events.xml.gz, or with an output folder that has it).";
   } catch (e) {
     if (seq !== pickSeq) return;
     $("files").innerHTML = "";
-    $("dropText").textContent = "Drop the run's output folder here";
+    $("dropText").textContent = "Drop the run's folder here";
     $("error").textContent = e.message || "That folder can't be read.";
   } finally {
     if (seq === pickSeq) { checking = false; update(); }
@@ -629,7 +623,7 @@ document.addEventListener("drop", async e => {
   if (!entry) return;
   if (entry.isDirectory) openFolder(() => fromDrop(entry));
   else if (/\.html?$/i.test(entry.name)) openSaved(entryFile(entry));  // claims its turn now, reads the file after
-  else $("error").textContent = "Drop the run's output folder, not a single file.";
+  else $("error").textContent = "Drop the run's folder, not a single file.";
 });
 
 $("sample").querySelectorAll("button").forEach(b => b.onclick = () => { setSample(+b.dataset.v); store.set({ sample }); });
