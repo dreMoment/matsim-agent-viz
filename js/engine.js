@@ -244,11 +244,11 @@ function attrs(s, i) {
  * `text` is the text right after the tag (up to the next tag), only when `withText` is set.
  * Reports the bytes read (on disk, so compressed bytes for .gz) to onBytes.
  * With `types`, a tag whose type="..." is not in it is skipped unread (its attributes would only be garbage,
- * which Safari is slow to collect); returns how many were skipped.
+ * which Safari is slow to collect), and onSkip() is called instead.
  */
-async function scan(file, names, onTag, { withText = false, onBytes, types } = {}) {
+async function scan(file, names, onTag, { withText = false, onBytes, types, onSkip } = {}) {
   const reader = (await textStream(file, onBytes)).getReader();
-  let rest = "", root = null, closed = false, skipped = 0;
+  let rest = "", root = null, closed = false;
   try {
     for (;;) {
       const { value, done } = await reader.read();
@@ -273,13 +273,13 @@ async function scan(file, names, onTag, { withText = false, onBytes, types } = {
         if (e >= n) { pos = lt; break; }
         const name = text.slice(lt + 1, e);
         if (names.has(name)) {
-          if (types) {  // a plain ' type="..."' before the first ">"; anything else is read in full
+          if (types) {  // a plain ' type="..."' (no entities) before the first ">"; anything else is read in full
             const gt = text.indexOf(">", e);
             if (gt < 0) { pos = lt; break; }
             const k = text.indexOf(' type="', e);
             if (k >= 0 && k < gt) {
-              const q = text.indexOf('"', k + 7);
-              if (q >= 0 && q < gt && !types.has(text.slice(k + 7, q))) { skipped++; pos = gt + 1; continue; }
+              const q = text.indexOf('"', k + 7), type = q >= 0 && q < gt ? text.slice(k + 7, q) : "&";
+              if (type.indexOf("&") < 0 && !types.has(type)) { onSkip?.(); pos = gt + 1; continue; }
             }
           }
           const r = attrs(text, e);
@@ -317,7 +317,6 @@ async function scan(file, names, onTag, { withText = false, onBytes, types } = {
     fail(`${file.name} could not be read${err.message ? ` (${err.message})` : ""}. Is the file complete, or was the copy cut off?`);
   }
   if (!closed) fail(`${file.name} ends too early${root ? ` (no closing </${root}>)` : ""}. Is the file complete, or was the copy cut off?`);
-  return skipped;
 }
 
 /** A small XML tree (tags, attributes, children; no text), for config files. */
@@ -1273,9 +1272,11 @@ async function buildLegs(file, sample, { linkFrom, linkMid }, stops, sharing, ro
   const types = new Set(["actend", "departure", "PersonEntersVehicle", "PersonLeavesVehicle", "entered link",
     "VehicleArrivesAtFacility", "VehicleDepartsAtFacility", "TransitDriverStarts", "arrival", "actstart",
     ...(sharing ? Object.keys(SHARING_EVENTS) : [])]);
-  const skipped = await scan(file, new Set(["event"]), (_, a) => {
-    nEvents++;
-    if (nEvents % 5_000_000 === 0) say(`  ${nEvents / 1e6} M events read (${Math.round((Date.now() - started) / 1000)} s)`);
+  const counted = () => {  // events read and skipped alike
+    if (++nEvents % 5_000_000 === 0) say(`  ${nEvents / 1e6} M events read (${Math.round((Date.now() - started) / 1000)} s)`);
+  };
+  await scan(file, new Set(["event"]), (_, a) => {
+    counted();
     const typ = a.type, t = +a.time, person = a.person;
     switch (typ) {
       case "actend":
@@ -1373,8 +1374,7 @@ async function buildLegs(file, sample, { linkFrom, linkMid }, stops, sharing, ro
         if (s !== undefined) sharing.ev.push([round(t), s, kind]);
       }
     }
-  }, { onBytes, types });
-  nEvents += skipped;
+  }, { onBytes, types, onSkip: counted });
   for (const p of [...pending.keys()]) finish(p);
   if (nEvents === 0) fail(`${file.name} contains no events.`);
   const hops = new Map();  // only those of kept legs
@@ -1573,6 +1573,7 @@ export async function build(files, opt, env, entries = []) {
     }
   }
 
+  sched = null; net.roads = null;  // not needed for the page, which is the peak: free them first
   env.progress({ step: "Writing the page" });
   const payload = toPayload(legs, crs, sharing, tracks, world);
   const title = opt.title || scenarioName(opt.folder);
