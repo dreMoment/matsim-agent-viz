@@ -172,14 +172,23 @@ async function isGzip(file) {
   return b[0] === GZIP[0] && b[1] === GZIP[1];
 }
 
+// Safari reads a file in pieces of 8 MB, which a .gz file unzips to strings of ~90 M characters. Its garbage
+// collector falls far behind on those, and a big run's events took the tab past Safari's memory limit, so
+// Safari reloaded it. Cut to 64 KB pieces (about what Chrome reads), the same events need a fraction of that.
+const PIECE = 64 * 1024;
+
 async function textStream(file, onBytes) {
-  let stream = file.stream();
-  if (onBytes) {
-    let read = 0;
-    stream = stream.pipeThrough(new TransformStream({
-      transform(chunk, ctl) { read += chunk.byteLength; onBytes(read); ctl.enqueue(chunk); },
-    }));
-  }
+  let read = 0;
+  let stream = file.stream().pipeThrough(new TransformStream({
+    transform(chunk, ctl) {
+      for (let i = 0; i < chunk.byteLength; i += PIECE) {
+        const piece = chunk.subarray(i, i + PIECE);
+        read += piece.byteLength;
+        onBytes?.(read);
+        ctl.enqueue(piece);
+      }
+    },
+  }));
   if (await isGzip(file)) stream = stream.pipeThrough(new DecompressionStream("gzip"));
   else if (file.name.endsWith(".gz")) fail(`${file.name} ends in .gz but is not gzip. Rename it or copy the file again.`);
   return stream.pipeThrough(new TextDecoderStream());
@@ -568,6 +577,18 @@ export function simplify(pts, tol) {
   }
   return pts.filter((_, i) => keep[i]);
 }
+
+/** Whether simplify() would keep only the ends of [a, ...dropped, last, b]: no point between them lies more
+ * than MERGE_TOL_M off the line from a to b. a and last are [t, x, y], dropped is flat [x, y, ...] or
+ * undefined, b is [x, y]. Allocates nothing: it runs for every point of every sampled vehicle leg. */
+function onTheWay(a, dropped, last, b) {
+  const ax = a[1], ay = a[2], dx = b[0] - ax, dy = b[1] - ay, ln = hypot(dx, dy);
+  if (offLine(ax, ay, dx, dy, ln, last[1], last[2])) return false;
+  if (dropped) for (let k = 0; k < dropped.length; k += 2) if (offLine(ax, ay, dx, dy, ln, dropped[k], dropped[k + 1])) return false;
+  return true;
+}
+const offLine = (ax, ay, dx, dy, ln, x, y) =>  // the distance simplify() measures
+  (ln ? Math.abs(dx * (ay - y) - dy * (ax - x)) / ln : hypot(x - ax, y - ay)) > MERGE_TOL_M;
 
 /** A binary min-heap of [priority, value] pairs. */
 class Heap {
@@ -1222,11 +1243,10 @@ async function buildLegs(file, sample, { linkFrom, linkMid }, stops, sharing, ro
     if (!leg || !xy) return;
     if (routed) leg.routed = true;
     const pts = leg.pts, n = pts.length;
-    const last = n > 1 && [pts[n - 1][1], pts[n - 1][2]];
-    if (n > 1 && t - pts[n - 2][0] < MIN_POINT_GAP_S && leg.kept !== n - 1 &&
-        simplify([[pts[n - 2][1], pts[n - 2][2]], ...(leg.dropped ?? []), last, xy], MERGE_TOL_M).length === 2) {
-      (leg.dropped ??= []).push(last);
-      pts[n - 1] = [t, xy[0], xy[1]];
+    if (n > 1 && t - pts[n - 2][0] < MIN_POINT_GAP_S && leg.kept !== n - 1 && onTheWay(pts[n - 2], leg.dropped, pts[n - 1], xy)) {
+      const last = pts[n - 1];
+      (leg.dropped ??= []).push(last[1], last[2]);
+      last[0] = t; last[1] = xy[0]; last[2] = xy[1];
     } else { pts.push([t, xy[0], xy[1]]); leg.dropped = undefined; }
     if (keep) leg.kept = pts.length - 1;
   };

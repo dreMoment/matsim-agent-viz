@@ -440,6 +440,7 @@ function stopWorker() {
   showWorking(false);
   update();
   if (shown) $("build").focus();  // focus was in the card, now hidden
+  showBackdrop();  // back after a failed or stopped build; a built page opens the viewer, which keeps it off
 }
 // A failed build: the log stays at hand, under the error.
 function buildFailed(msg) {
@@ -465,6 +466,7 @@ $("build").onclick = () => {
   $("wkTitle").textContent = opt.world ? "Building the 3D world" : "Building the map";
   $("wkSub").textContent = `${folder.name} · ${share}${osm ? " · OpenStreetMap paths" : ""}`;
   update(); showProgress(null); showWorking(true);
+  hideBackdrop();  // the demo map behind the card holds ~0.5 GB, which a big run needs (Safari reloads a tab past its limit)
   const log = [];
   worker.onmessage = ({ data }) => {
     if (data.log) { log.push(data.log); $("log").textContent = log.join("\n"); $("log").scrollTop = 1e9; return; }
