@@ -213,7 +213,7 @@
     </div>
     <details id="logBox"><summary>Details</summary><div class="log" id="log"></div></details>
     <div class="actions">
-      <span class="note">Read in this tab, nothing is uploaded.</span>
+      <span class="note">Read in this tab, nothing is uploaded. Keep the tab in front: a browser may reload a big build in the background.</span>
       <span class="spacer"></span>
       <button id="cancel">Stop</button>
     </div>
@@ -440,11 +440,11 @@ function stopWorker() {
   showWorking(false);
   update();
   if (shown) $("build").focus();  // focus was in the card, now hidden
-  showBackdrop();  // back after a failed or stopped build; a built page opens the viewer, which keeps it off
 }
 // A failed build: the log stays at hand, under the error.
 function buildFailed(msg) {
   stopWorker();
+  showBackdrop();
   $("error").textContent = msg;
   $("error").after($("logBox"));
 }
@@ -484,7 +484,7 @@ $("build").onclick = () => {
   worker.onerror = e => buildFailed(`The build stopped: ${e.message || "unknown error"}. A very large run may need a smaller sample.`);
   worker.postMessage({ files, entries: folder.entries, opt });
 };
-$("cancel").onclick = () => { stopWorker(); $("error").textContent = "Stopped."; };
+$("cancel").onclick = () => { stopWorker(); showBackdrop(); $("error").textContent = "Stopped."; };
 
 const slug = s => (s || "matsim").normalize("NFKD").replace(/[^\w.-]+/g, "_").replace(/^_+|_+$/g, "") || "matsim";
 
@@ -518,14 +518,14 @@ async function showBackdrop() {
       renderParts(template, { ...data, demo: true }, { title: "Zurich", eyebrow: "", note: "" }), { type: "text/html" })));
   }
   const url = await backdrop.catch(() => null), fr = $("backdrop");
-  if (!url || !$("viewer").hidden || fr.src === url) return;
+  if (!url || worker || !$("viewer").hidden || fr.src === url) return;  // off while a build runs or a page is open
   fr.classList.remove("on");
   fr.onload = () => { clearTimeout(fr.late); fr.late = setTimeout(revealBackdrop, 4000); };  // if it never says it's ready
   fr.src = url;
 }
 addEventListener("message", e => {
   const fr = $("backdrop");
-  if (e.source === fr.contentWindow && e.data?.demoReady) revealBackdrop();
+  if (e.source === fr.contentWindow && e.data?.demoReady && !worker && $("viewer").hidden) revealBackdrop();
 });
 // The live map shows the still's frame, so the fade is seamless; once it is done, the map starts moving (gently).
 function revealBackdrop() {

@@ -243,10 +243,12 @@ function attrs(s, i) {
  * Streams a file and calls onTag(name, attrs, text) for each start tag whose name is in `names`.
  * `text` is the text right after the tag (up to the next tag), only when `withText` is set.
  * Reports the bytes read (on disk, so compressed bytes for .gz) to onBytes.
+ * With `types`, a tag whose type="..." is not in it is skipped unread (its attributes would only be garbage,
+ * which Safari is slow to collect); returns how many were skipped.
  */
-async function scan(file, names, onTag, { withText = false, onBytes } = {}) {
+async function scan(file, names, onTag, { withText = false, onBytes, types } = {}) {
   const reader = (await textStream(file, onBytes)).getReader();
-  let rest = "", root = null, closed = false;
+  let rest = "", root = null, closed = false, skipped = 0;
   try {
     for (;;) {
       const { value, done } = await reader.read();
@@ -271,6 +273,15 @@ async function scan(file, names, onTag, { withText = false, onBytes } = {}) {
         if (e >= n) { pos = lt; break; }
         const name = text.slice(lt + 1, e);
         if (names.has(name)) {
+          if (types) {  // a plain ' type="..."' before the first ">"; anything else is read in full
+            const gt = text.indexOf(">", e);
+            if (gt < 0) { pos = lt; break; }
+            const k = text.indexOf(' type="', e);
+            if (k >= 0 && k < gt) {
+              const q = text.indexOf('"', k + 7);
+              if (q >= 0 && q < gt && !types.has(text.slice(k + 7, q))) { skipped++; pos = gt + 1; continue; }
+            }
+          }
           const r = attrs(text, e);
           if (!r) { pos = lt; break; }  // the tag goes on in the next chunk
           const gt = r[1];
@@ -306,6 +317,7 @@ async function scan(file, names, onTag, { withText = false, onBytes } = {}) {
     fail(`${file.name} could not be read${err.message ? ` (${err.message})` : ""}. Is the file complete, or was the copy cut off?`);
   }
   if (!closed) fail(`${file.name} ends too early${root ? ` (no closing </${root}>)` : ""}. Is the file complete, or was the copy cut off?`);
+  return skipped;
 }
 
 /** A small XML tree (tags, attributes, children; no text), for config files. */
@@ -1257,7 +1269,11 @@ async function buildLegs(file, sample, { linkFrom, linkMid }, stops, sharing, ro
   };
   const actXY = a => (a.x !== undefined && a.y !== undefined) ? [+a.x, +a.y] : linkMid.get(a.link);
 
-  await scan(file, new Set(["event"]), (_, a) => {
+  // The event types the switch below uses; the others (left link, traffic, travelled, ...) are skipped unread.
+  const types = new Set(["actend", "departure", "PersonEntersVehicle", "PersonLeavesVehicle", "entered link",
+    "VehicleArrivesAtFacility", "VehicleDepartsAtFacility", "TransitDriverStarts", "arrival", "actstart",
+    ...(sharing ? Object.keys(SHARING_EVENTS) : [])]);
+  const skipped = await scan(file, new Set(["event"]), (_, a) => {
     nEvents++;
     if (nEvents % 5_000_000 === 0) say(`  ${nEvents / 1e6} M events read (${Math.round((Date.now() - started) / 1000)} s)`);
     const typ = a.type, t = +a.time, person = a.person;
@@ -1357,7 +1373,8 @@ async function buildLegs(file, sample, { linkFrom, linkMid }, stops, sharing, ro
         if (s !== undefined) sharing.ev.push([round(t), s, kind]);
       }
     }
-  }, { onBytes });
+  }, { onBytes, types });
+  nEvents += skipped;
   for (const p of [...pending.keys()]) finish(p);
   if (nEvents === 0) fail(`${file.name} contains no events.`);
   const hops = new Map();  // only those of kept legs
@@ -1527,6 +1544,7 @@ export async function build(files, opt, env, entries = []) {
   const { legs, hops, nEvents } = await buildLegs(events, sample, net, sched.stops, sharing,
     rail ? sched.kinds : null, world ? sched.vkinds : null, tracker("Reading events", events), env.say);
   if (!legs.length) fail("no legs found for the sampled agents. Try a larger sample.");
+  net.linkFrom = net.linkMid = null;  // not needed from here on: free them before the page is written
 
   let tracks = new Map();
   if (hops.size) {
