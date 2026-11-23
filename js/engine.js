@@ -172,14 +172,23 @@ async function isGzip(file) {
   return b[0] === GZIP[0] && b[1] === GZIP[1];
 }
 
+// Safari reads a file in pieces of 8 MB, which a .gz file unzips to strings of ~90 M characters. Its garbage
+// collector falls far behind on those, and a big run's events took the tab past Safari's memory limit, so
+// Safari reloaded it. Cut to 64 KB pieces (about what Chrome reads), the same events need a fraction of that.
+const PIECE = 64 * 1024;
+
 async function textStream(file, onBytes) {
-  let stream = file.stream();
-  if (onBytes) {
-    let read = 0;
-    stream = stream.pipeThrough(new TransformStream({
-      transform(chunk, ctl) { read += chunk.byteLength; onBytes(read); ctl.enqueue(chunk); },
-    }));
-  }
+  let read = 0;
+  let stream = file.stream().pipeThrough(new TransformStream({
+    transform(chunk, ctl) {
+      for (let i = 0; i < chunk.byteLength; i += PIECE) {
+        const piece = chunk.subarray(i, i + PIECE);
+        read += piece.byteLength;
+        onBytes?.(read);
+        ctl.enqueue(piece);
+      }
+    },
+  }));
   if (await isGzip(file)) stream = stream.pipeThrough(new DecompressionStream("gzip"));
   else if (file.name.endsWith(".gz")) fail(`${file.name} ends in .gz but is not gzip. Rename it or copy the file again.`);
   return stream.pipeThrough(new TextDecoderStream());
@@ -234,16 +243,28 @@ function attrs(s, i) {
  * Streams a file and calls onTag(name, attrs, text) for each start tag whose name is in `names`.
  * `text` is the text right after the tag (up to the next tag), only when `withText` is set.
  * Reports the bytes read (on disk, so compressed bytes for .gz) to onBytes.
+ * With `types`, a tag whose type="..." is not in it is skipped unread (its attributes would only be garbage,
+ * which Safari is slow to collect), and onSkip() is called instead. So is a tag for which skip(type, raw) is
+ * true: raw(' name="') gives that attribute's plain value, or undefined if it isn't plainly there.
  */
-async function scan(file, names, onTag, { withText = false, onBytes } = {}) {
+async function scan(file, names, onTag, { withText = false, onBytes, types, skip, onSkip } = {}) {
   const reader = (await textStream(file, onBytes)).getReader();
   let rest = "", root = null, closed = false;
+  let tag = "", from = 0, to = 0;  // the tag skip() looks at
+  const raw = needle => {
+    const k = tag.indexOf(needle, from);
+    if (k < 0 || k >= to) return undefined;
+    const q = tag.indexOf('"', k + needle.length);
+    if (q < 0 || q >= to) return undefined;
+    const v = tag.slice(k + needle.length, q);
+    return v.indexOf("&") < 0 ? v : undefined;
+  };
   try {
     for (;;) {
       const { value, done } = await reader.read();
       if (done) break;
       const text = rest + value, n = text.length;
-      let pos = 0;
+      let pos = 0, quote = -1;  // the next "'" at or after the tag being looked at (n: none left)
       for (;;) {
         const lt = text.indexOf("<", pos);
         if (lt < 0) { pos = n; break; }
@@ -262,6 +283,21 @@ async function scan(file, names, onTag, { withText = false, onBytes } = {}) {
         if (e >= n) { pos = lt; break; }
         const name = text.slice(lt + 1, e);
         if (names.has(name)) {
+          if (types) {  // a plain ' type="..."' (no entities, no "'") before the first ">"; else read in full
+            const gt = text.indexOf(">", e);
+            if (gt < 0) { pos = lt; break; }
+            if (quote < e) { quote = text.indexOf("'", e); if (quote < 0) quote = n; }
+            const k = quote < gt ? -1 : text.indexOf(' type="', e);
+            if (k >= 0 && k < gt) {
+              const q = text.indexOf('"', k + 7), type = q >= 0 && q < gt ? text.slice(k + 7, q) : "&";
+              if (type.indexOf("&") < 0) {
+                tag = text; from = e; to = gt;
+                const skipped = !types.has(type) || skip?.(type, raw);
+                tag = "";
+                if (skipped) { onSkip?.(); pos = gt + 1; continue; }
+              }
+            }
+          }
           const r = attrs(text, e);
           if (!r) { pos = lt; break; }  // the tag goes on in the next chunk
           const gt = r[1];
@@ -568,6 +604,18 @@ export function simplify(pts, tol) {
   }
   return pts.filter((_, i) => keep[i]);
 }
+
+/** Whether simplify() would keep only the ends of [a, ...dropped, last, b]: no point between them lies more
+ * than MERGE_TOL_M off the line from a to b. a and last are [t, x, y], dropped is flat [x, y, ...] or
+ * undefined, b is [x, y]. Allocates nothing: it runs for every point of every sampled vehicle leg. */
+function onTheWay(a, dropped, last, b) {
+  const ax = a[1], ay = a[2], dx = b[0] - ax, dy = b[1] - ay, ln = hypot(dx, dy);
+  if (offLine(ax, ay, dx, dy, ln, last[1], last[2])) return false;
+  if (dropped) for (let k = 0; k < dropped.length; k += 2) if (offLine(ax, ay, dx, dy, ln, dropped[k], dropped[k + 1])) return false;
+  return true;
+}
+const offLine = (ax, ay, dx, dy, ln, x, y) =>  // the distance simplify() measures
+  (ln ? Math.abs(dx * (ay - y) - dy * (ax - x)) / ln : hypot(x - ax, y - ay)) > MERGE_TOL_M;
 
 /** A binary min-heap of [priority, value] pairs. */
 class Heap {
@@ -1222,11 +1270,10 @@ async function buildLegs(file, sample, { linkFrom, linkMid }, stops, sharing, ro
     if (!leg || !xy) return;
     if (routed) leg.routed = true;
     const pts = leg.pts, n = pts.length;
-    const last = n > 1 && [pts[n - 1][1], pts[n - 1][2]];
-    if (n > 1 && t - pts[n - 2][0] < MIN_POINT_GAP_S && leg.kept !== n - 1 &&
-        simplify([[pts[n - 2][1], pts[n - 2][2]], ...(leg.dropped ?? []), last, xy], MERGE_TOL_M).length === 2) {
-      (leg.dropped ??= []).push(last);
-      pts[n - 1] = [t, xy[0], xy[1]];
+    if (n > 1 && t - pts[n - 2][0] < MIN_POINT_GAP_S && leg.kept !== n - 1 && onTheWay(pts[n - 2], leg.dropped, pts[n - 1], xy)) {
+      const last = pts[n - 1];
+      (leg.dropped ??= []).push(last[1], last[2]);
+      last[0] = t; last[1] = xy[0]; last[2] = xy[1];
     } else { pts.push([t, xy[0], xy[1]]); leg.dropped = undefined; }
     if (keep) leg.kept = pts.length - 1;
   };
@@ -1237,9 +1284,26 @@ async function buildLegs(file, sample, { linkFrom, linkMid }, stops, sharing, ro
   };
   const actXY = a => (a.x !== undefined && a.y !== undefined) ? [+a.x, +a.y] : linkMid.get(a.link);
 
+  // The event types the switch below uses; the others (left link, traffic, travelled, ...) are skipped unread.
+  const types = new Set(["actend", "departure", "PersonEntersVehicle", "PersonLeavesVehicle", "entered link",
+    "VehicleArrivesAtFacility", "VehicleDepartsAtFacility", "TransitDriverStarts", "arrival", "actstart",
+    ...(sharing ? Object.keys(SHARING_EVENTS) : [])]);
+  // Events of agents outside the sample change nothing below, so they are skipped unread too (at 10%, most
+  // events): a person's own events, and links entered by a vehicle without sampled riders. actstart is
+  // read for everyone when there is bike sharing (atStation).
+  const PERSON = ' person="', VEHICLE = ' vehicle="';
+  const ofPerson = new Set(["actend", "departure", "arrival", "PersonEntersVehicle", "PersonLeavesVehicle",
+    ...(sharing ? [] : ["actstart"])]);
+  const skip = (type, raw) => {
+    if (type === "entered link") { const v = raw(VEHICLE); return v !== undefined && !riders.has(v); }
+    if (ofPerson.has(type)) { const p = raw(PERSON); return p !== undefined && !sampled(p); }
+    return false;
+  };
+  const counted = () => {  // events read and skipped alike
+    if (++nEvents % 5_000_000 === 0) say(`  ${nEvents / 1e6} M events read (${Math.round((Date.now() - started) / 1000)} s)`);
+  };
   await scan(file, new Set(["event"]), (_, a) => {
-    nEvents++;
-    if (nEvents % 5_000_000 === 0) say(`  ${nEvents / 1e6} M events read (${Math.round((Date.now() - started) / 1000)} s)`);
+    counted();
     const typ = a.type, t = +a.time, person = a.person;
     switch (typ) {
       case "actend":
@@ -1337,7 +1401,7 @@ async function buildLegs(file, sample, { linkFrom, linkMid }, stops, sharing, ro
         if (s !== undefined) sharing.ev.push([round(t), s, kind]);
       }
     }
-  }, { onBytes });
+  }, { onBytes, types, skip, onSkip: counted });
   for (const p of [...pending.keys()]) finish(p);
   if (nEvents === 0) fail(`${file.name} contains no events.`);
   const hops = new Map();  // only those of kept legs
@@ -1507,6 +1571,7 @@ export async function build(files, opt, env, entries = []) {
   const { legs, hops, nEvents } = await buildLegs(events, sample, net, sched.stops, sharing,
     rail ? sched.kinds : null, world ? sched.vkinds : null, tracker("Reading events", events), env.say);
   if (!legs.length) fail("no legs found for the sampled agents. Try a larger sample.");
+  net.linkFrom = net.linkMid = null;  // not needed from here on: free them before the page is written
 
   let tracks = new Map();
   if (hops.size) {
@@ -1535,6 +1600,7 @@ export async function build(files, opt, env, entries = []) {
     }
   }
 
+  sched = null; net.roads = null;  // not needed for the page, which is the peak: free them first
   env.progress({ step: "Writing the page" });
   const payload = toPayload(legs, crs, sharing, tracks, world);
   const title = opt.title || scenarioName(opt.folder);
