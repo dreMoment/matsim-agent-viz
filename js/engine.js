@@ -244,11 +244,21 @@ function attrs(s, i) {
  * `text` is the text right after the tag (up to the next tag), only when `withText` is set.
  * Reports the bytes read (on disk, so compressed bytes for .gz) to onBytes.
  * With `types`, a tag whose type="..." is not in it is skipped unread (its attributes would only be garbage,
- * which Safari is slow to collect), and onSkip() is called instead.
+ * which Safari is slow to collect), and onSkip() is called instead. So is a tag for which skip(type, raw) is
+ * true: raw(' name="') gives that attribute's plain value, or undefined if it isn't plainly there.
  */
-async function scan(file, names, onTag, { withText = false, onBytes, types, onSkip } = {}) {
+async function scan(file, names, onTag, { withText = false, onBytes, types, skip, onSkip } = {}) {
   const reader = (await textStream(file, onBytes)).getReader();
   let rest = "", root = null, closed = false;
+  let tag = "", from = 0, to = 0;  // the tag skip() looks at
+  const raw = needle => {
+    const k = tag.indexOf(needle, from);
+    if (k < 0 || k >= to) return undefined;
+    const q = tag.indexOf('"', k + needle.length);
+    if (q < 0 || q >= to) return undefined;
+    const v = tag.slice(k + needle.length, q);
+    return v.indexOf("&") < 0 ? v : undefined;
+  };
   try {
     for (;;) {
       const { value, done } = await reader.read();
@@ -279,7 +289,10 @@ async function scan(file, names, onTag, { withText = false, onBytes, types, onSk
             const k = text.indexOf(' type="', e);
             if (k >= 0 && k < gt) {
               const q = text.indexOf('"', k + 7), type = q >= 0 && q < gt ? text.slice(k + 7, q) : "&";
-              if (type.indexOf("&") < 0 && !types.has(type)) { onSkip?.(); pos = gt + 1; continue; }
+              if (type.indexOf("&") < 0) {
+                tag = text; from = e; to = gt;
+                if (!types.has(type) || skip?.(type, raw)) { onSkip?.(); pos = gt + 1; continue; }
+              }
             }
           }
           const r = attrs(text, e);
@@ -1272,6 +1285,17 @@ async function buildLegs(file, sample, { linkFrom, linkMid }, stops, sharing, ro
   const types = new Set(["actend", "departure", "PersonEntersVehicle", "PersonLeavesVehicle", "entered link",
     "VehicleArrivesAtFacility", "VehicleDepartsAtFacility", "TransitDriverStarts", "arrival", "actstart",
     ...(sharing ? Object.keys(SHARING_EVENTS) : [])]);
+  // Events of agents outside the sample change nothing below, so they are skipped unread too (at 10%, most
+  // events): a person's own events, and links entered by a vehicle without sampled riders. actstart is
+  // read for everyone when there is bike sharing (atStation).
+  const PERSON = ' person="', VEHICLE = ' vehicle="';
+  const ofPerson = new Set(["actend", "departure", "arrival", "PersonEntersVehicle", "PersonLeavesVehicle",
+    ...(sharing ? [] : ["actstart"])]);
+  const skip = (type, raw) => {
+    if (type === "entered link") { const v = raw(VEHICLE); return v !== undefined && !riders.has(v); }
+    if (ofPerson.has(type)) { const p = raw(PERSON); return p !== undefined && !sampled(p); }
+    return false;
+  };
   const counted = () => {  // events read and skipped alike
     if (++nEvents % 5_000_000 === 0) say(`  ${nEvents / 1e6} M events read (${Math.round((Date.now() - started) / 1000)} s)`);
   };
@@ -1374,7 +1398,7 @@ async function buildLegs(file, sample, { linkFrom, linkMid }, stops, sharing, ro
         if (s !== undefined) sharing.ev.push([round(t), s, kind]);
       }
     }
-  }, { onBytes, types, onSkip: counted });
+  }, { onBytes, types, skip, onSkip: counted });
   for (const p of [...pending.keys()]) finish(p);
   if (nEvents === 0) fail(`${file.name} contains no events.`);
   const hops = new Map();  // only those of kept legs
