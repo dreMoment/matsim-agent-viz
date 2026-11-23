@@ -264,7 +264,7 @@ async function scan(file, names, onTag, { withText = false, onBytes, types, skip
       const { value, done } = await reader.read();
       if (done) break;
       const text = rest + value, n = text.length;
-      let pos = 0;
+      let pos = 0, quote = -1;  // the next "'" at or after the tag being looked at (n: none left)
       for (;;) {
         const lt = text.indexOf("<", pos);
         if (lt < 0) { pos = n; break; }
@@ -283,15 +283,18 @@ async function scan(file, names, onTag, { withText = false, onBytes, types, skip
         if (e >= n) { pos = lt; break; }
         const name = text.slice(lt + 1, e);
         if (names.has(name)) {
-          if (types) {  // a plain ' type="..."' (no entities) before the first ">"; anything else is read in full
+          if (types) {  // a plain ' type="..."' (no entities, no "'") before the first ">"; else read in full
             const gt = text.indexOf(">", e);
             if (gt < 0) { pos = lt; break; }
-            const k = text.indexOf(' type="', e);
+            if (quote < e) { quote = text.indexOf("'", e); if (quote < 0) quote = n; }
+            const k = quote < gt ? -1 : text.indexOf(' type="', e);
             if (k >= 0 && k < gt) {
               const q = text.indexOf('"', k + 7), type = q >= 0 && q < gt ? text.slice(k + 7, q) : "&";
               if (type.indexOf("&") < 0) {
                 tag = text; from = e; to = gt;
-                if (!types.has(type) || skip?.(type, raw)) { onSkip?.(); pos = gt + 1; continue; }
+                const skipped = !types.has(type) || skip?.(type, raw);
+                tag = "";
+                if (skipped) { onSkip?.(); pos = gt + 1; continue; }
               }
             }
           }
