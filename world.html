@@ -305,15 +305,17 @@ function clipLine(line, E) {
 }
 
 const NOWIN = [-1, 0, 0, 0];
-class Mesh {  // flat-shaded triangles with colours, normals per face, and where windows go (walls only)
-  constructor(win) { this.p = []; this.n = []; this.c = []; this.w = win ? [] : null; }
+// Flat-shaded triangles with colours, normals per face, and where windows go (walls only). Normals and colours
+// are kept once per triangle and go out as bytes: a third of the size of floats, on the GPU and while building.
+class Mesh {
+  constructor(win) { this.p = []; this.f = []; this.w = win ? [] : null; }
   tri(a, b, c, col, wa = NOWIN, wb = NOWIN, wc = NOWIN) {
     if (this.w) this.w.push(...wa, ...wb, ...wc);
     const ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2], vx = c[0] - a[0], vy = c[1] - a[1], vz = c[2] - a[2];
     let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx; const l = Math.hypot(nx, ny, nz) || 1;
     nx /= l; ny /= l; nz /= l;
     this.p.push(...a, ...b, ...c);
-    for (let k = 0; k < 3; k++) { this.n.push(nx, ny, nz); this.c.push(col[0], col[1], col[2]); }
+    this.f.push(nx, ny, nz, col[0], col[1], col[2]);
   }
   quad(a, b, c, d, col) { this.tri(a, b, c, col); this.tri(a, c, d, col); }
   // a wall from a to b (x, z), between heights y0 and y1; windows are placed from the ground height g up
@@ -324,7 +326,12 @@ class Mesh {  // flat-shaded triangles with colours, normals per face, and where
     this.tri(A0, B0, B1, col, wA0, wB0, wB1); this.tri(A0, B1, A1, col, wA0, wB1, wA1);
   }
   out() {
-    const o = { pos: new Float32Array(this.p), nor: new Float32Array(this.n), col: new Float32Array(this.c) };
+    const f = this.f, nt = f.length / 6, nor = new Int8Array(nt * 9), col = new Uint8Array(nt * 9);
+    for (let t = 0; t < nt; t++) for (let k = 0; k < 3; k++) for (let j = 0; j < 3; j++) {
+      nor[t * 9 + k * 3 + j] = Math.round(f[t * 6 + j] * 127);
+      col[t * 9 + k * 3 + j] = Math.round(Math.min(1, Math.max(0, f[t * 6 + 3 + j])) * 255);
+    }
+    const o = { pos: new Float32Array(this.p), nor, col };
     if (this.w) o.win = new Float32Array(this.w);
     return o;
   }
@@ -474,12 +481,67 @@ const DECID = ['#4f7f3a', '#5b8b40', '#467536', '#62904a', '#55843c'].map(rgb);
 const CONIF = ['#2e5732', '#355f37', '#2a5030', '#33603a'].map(rgb);
 
 self.onmessage = async ({ data: job }) => {
-  try { self.postMessage(...await buildTile(job)); }
+  try { const [out, transfer] = await getTile(job); out.id = job.id; self.postMessage(out, transfer); }
   catch (e) { self.postMessage({ id: job.id, error: String(e && e.message || e) }); }
 };
 
-async function buildTile({ id, z, x, y, S, level, tiles }) {
-  const N = level === 'far' ? 32 : 64, T = level === 'far' ? 512 : level === 'full' ? 2048 : 1024;
+// Built near tiles are kept in this browser (IndexedDB), so opening the world again, or coming back to a place,
+// skips the build. Only public map data: no run data. Far tiles build in a few ms and are not kept. The key holds
+// the tile set's version and this code's (job.v), so a new map or a new build never reads an old tile.
+const CACHE_BYTES = 300 * 2 ** 20, CACHE_DAYS = 7;
+let dbOpen = null;
+const db = () => dbOpen ??= new Promise((res, rej) => {
+  const q = indexedDB.open('world-tiles', 1);
+  q.onupgradeneeded = () => { for (const n of ['geo', 'tex', 'meta']) q.result.createObjectStore(n); };
+  q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
+}).catch(() => null);  // no IndexedDB (private window, blocked storage): build every time
+const req = q => new Promise((res, rej) => { q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error); });
+const done = tx => new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = tx.onabort = () => rej(tx.error); });
+function buffers(o, set = new Set()) {  // every array buffer in a built tile, to transfer it
+  if (ArrayBuffer.isView(o)) set.add(o.buffer);
+  else if (o && typeof o === 'object' && !(o instanceof ImageBitmap)) for (const v of Object.values(o)) buffers(v, set);
+  return set;
+}
+
+async function getTile(job) {
+  if (job.level === 'far') return buildTile(job);
+  const key = `${job.v}|${job.tiles}|${job.z}/${job.x}/${job.y}/${job.level}/${job.T}/${job.S.toFixed(2)}`, d = await db();
+  if (d) try {
+    const tx = d.transaction(['geo', 'tex', 'meta']), [out, tex, meta] = await Promise.all(['geo', 'tex', 'meta'].map(n => req(tx.objectStore(n).get(key))));
+    if (out && tex && meta && Date.now() - meta.at < CACHE_DAYS * 864e5) {
+      d.transaction('meta', 'readwrite').objectStore('meta').put({ ...meta, used: Date.now() }, key);
+      out.texture = await createImageBitmap(new ImageData(tex.data, tex.width, tex.height));
+      return [out, [...buffers(out), out.texture]];
+    }
+  } catch { /* a broken entry: build it again */ }
+  const [out, transfer, pixels] = await buildTile(job);
+  const T = job.T;
+  if (d) try {  // put() copies the arrays at once, before they go to the page
+    const { texture, id, ...geo } = out, tx = d.transaction(['geo', 'tex', 'meta'], 'readwrite');
+    let size = pixels.data.byteLength; for (const b of buffers(geo)) size += b.byteLength;
+    tx.objectStore('geo').put(geo, key);
+    tx.objectStore('tex').put({ data: pixels.data, width: T, height: T }, key);
+    tx.objectStore('meta').put({ at: Date.now(), used: Date.now(), size }, key);
+    done(tx).then(() => trimCache(d)).catch(() => {});
+  } catch { /* full storage: just don't keep it */ }
+  return [out, transfer];
+}
+
+// drops the least recently used tiles past CACHE_BYTES, and any older than CACHE_DAYS
+async function trimCache(d) {
+  const tx = d.transaction('meta'), st = tx.objectStore('meta');
+  const [keys, metas] = await Promise.all([req(st.getAllKeys()), req(st.getAll())]);
+  const list = keys.map((k, i) => ({ k, ...metas[i] })).sort((a, b) => b.used - a.used), drop = [];
+  let total = 0;
+  for (const e of list) { total += e.size; if (total > CACHE_BYTES || Date.now() - e.at > CACHE_DAYS * 864e5) drop.push(e.k); }
+  if (!drop.length) return;
+  const del = d.transaction(['geo', 'tex', 'meta'], 'readwrite');
+  for (const k of drop) for (const n of ['geo', 'tex', 'meta']) del.objectStore(n).delete(k);
+  await done(del);
+}
+
+async function buildTile({ id, z, x, y, S, level, tiles, T }) {  // T: the ground texture's size (TEX in the page)
+  const N = level === 'far' ? 32 : 64;
   const [dem, buf] = await Promise.all([
     fetchDem(z, x, y),
     fetch(tiles.replace('{z}', z).replace('{x}', x).replace('{y}', y)).then(r => r.ok ? r.arrayBuffer() : null).catch(() => null),
@@ -820,9 +882,11 @@ async function buildTile({ id, z, x, y, S, level, tiles }) {
     out.trees = { dec: inst(dec, DECID), con: inst(con, CONIF) };
     if (decks) { out.deckH = deckH; out.deckD = deckD; transfer.push(deckH.buffer, deckD.buffer); }  // after footbridges too
   }
+  // the pixels, for the cache: raw, since encoding them (WebP, PNG) costs more than the build saves
+  const pixels = level === 'far' ? null : g.getImageData(0, 0, T, T);
   out.texture = cv.transferToImageBitmap();
   transfer.push(out.texture);
-  return [out, transfer];
+  return [out, transfer, pixels];
 }
 </script>
 
@@ -840,6 +904,9 @@ const MX0 = mercX(DATA.centre[0]), MY0 = mercY(DATA.centre[1]), K = Math.cos(DAT
 const toLocalX = lon => (mercX(lon) - MX0) * K, toLocalZ = lat => -(mercY(lat) - MY0) * K;
 function tileRect(z, x, y) { const s = WORLD / 2 ** z; return { X0: (x * s - WORLD / 2 - MX0) * K, Z0: -((WORLD / 2 - y * s) - MY0) * K, S: s * K }; }
 function tileAt(z, X, Z) { const n = 2 ** z, mx = X / K + MX0, my = -Z / K + MY0; return [Math.floor((mx + WORLD / 2) / WORLD * n), Math.floor((WORLD / 2 - my) / WORLD * n)]; }
+// Small-memory machines (4 GB or less; only Chrome and Edge tell) get lighter tiles and fewer workers: past its
+// memory, a machine swaps and everything slows down.
+const LOW_MEMORY = navigator.deviceMemory <= 4;
 
 // ---------- modes (same names and colours as the map page)
 const MODE_STYLE = {
@@ -899,6 +966,7 @@ for (const [li, vid, kind, board] of DATA.pt || []) {
 }
 legs.forEach(l => modes[l.m].count++);
 const nVehicles = (DATA.pt || []).reduce((a, p) => Math.max(a, p[1] + 1), 0);
+DATA.legs = DATA.pt = DATA.tracks = null; TRACKS.length = 0;  // converted above: free the raw run data
 const tMin = legs.length ? legs[0].t0 : 0;
 const tMax = legs.reduce((a, l) => Math.max(a, l.t1), 0);
 const hhmm = s => `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor(s % 3600 / 60)).padStart(2, '0')}`;
@@ -928,7 +996,7 @@ function pointAt(l, s) {
 // ---------- renderer, scene, sky, light
 const canvas = $('view');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(devicePixelRatio, LOW_MEMORY ? 1 : 2));
 renderer.shadowMap.enabled = true; renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 const scene = new THREE.Scene();
 scene.fog = new THREE.Fog(0xdfe9f0, 2500, 26000);
@@ -956,7 +1024,7 @@ const hemi = new THREE.HemisphereLight(0xdfeeff, 0x6f7a5a, 1.4);
 scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xffffff, 2.6);
 sun.castShadow = true;
-sun.shadow.mapSize.set(4096, 4096);
+sun.shadow.mapSize.setScalar(LOW_MEMORY ? 2048 : 4096);
 sun.shadow.bias = -0.0004; sun.shadow.normalBias = 0.6; sun.shadow.intensity = 0.7;  // shade stays slate grey, not black
 sun.shadow.camera.near = 10; sun.shadow.camera.far = 9000;
 scene.add(sun, sun.target);
@@ -1040,11 +1108,14 @@ function farMaterial(map) {
 // ---------- tiles: z14 near the focus (full detail close by, lighter further out), z12 to the horizon
 const NEAR_Z = 14, FAR_Z = 12;
 const R_FULL = 1900, R_LITE = 3800, R_FAR = 32000;
+const TEX = LOW_MEMORY ? { full: 1024, lite: 512, far: 512 } : { full: 2048, lite: 1024, far: 512 };  // ground texture sizes
 const tiles = new Map();   // key -> tile
 const keyOf = (z, x, y) => (z === NEAR_Z ? 0 : 1) * 1e9 + x * 32768 + y;
 let tileTemplate = null;
-const workerSrc = URL.createObjectURL(new Blob([$('tileWorker').textContent], { type: 'text/javascript' }));
-const nWorkers = Math.max(2, Math.min(5, (navigator.hardwareConcurrency || 4) - 2));
+const workerText = $('tileWorker').textContent;
+const workerSrc = URL.createObjectURL(new Blob([workerText], { type: 'text/javascript' }));
+let workerV = 0; for (let i = 0; i < workerText.length; i++) workerV = Math.imul(workerV, 31) + workerText.charCodeAt(i) | 0;  // cached tiles' version
+const nWorkers = LOW_MEMORY ? 2 : Math.max(2, Math.min(5, (navigator.hardwareConcurrency || 4) - 2));
 const workers = [], jobs = new Map();
 let jobSeq = 0, inFlight = 0;
 for (let w = 0; w < nWorkers; w++) {
@@ -1069,7 +1140,14 @@ function request(t) {
   const id = ++jobSeq; inFlight++; t.pending = t.want;
   const r = tileRect(t.z, t.x, t.y);
   jobs.set(id, data => onTile(t, data, t.pending));
-  workers[id % nWorkers].postMessage({ id, z: t.z, x: t.x, y: t.y, S: r.S, level: t.want, tiles: tileTemplate });
+  workers[id % nWorkers].postMessage({ id, z: t.z, x: t.x, y: t.y, S: r.S, level: t.want, tiles: tileTemplate, T: TEX[t.want], v: workerV });
+}
+
+// Once the GPU has a tile, the page drops its own copy of the geometry and texture: that copy was a large share
+// of the tab's memory, which slows small-memory machines most. (So after a lost GPU context, tiles are rebuilt.)
+function freeOnUpload() { this.array = null; }
+function attr(g, name, arr, size) {  // byte normals and colours (from the worker's Mesh) are normalized to -1..1 / 0..1
+  g.setAttribute(name, new THREE.BufferAttribute(arr, size, !(arr instanceof Float32Array)).onUpload(freeOnUpload));
 }
 
 let failedTiles = 0;
@@ -1081,11 +1159,10 @@ function onTile(t, d, level) {
   const group = new THREE.Group(); group.position.set(r.X0, 0, r.Z0);
   const tex = new THREE.Texture(d.texture);
   tex.flipY = false; tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = MAX_ANISO; tex.needsUpdate = true;
+  tex.onUpdate = () => d.texture.close();
   const tg = new THREE.BufferGeometry();
-  tg.setAttribute('position', new THREE.BufferAttribute(d.terrain.pos, 3));
-  tg.setAttribute('normal', new THREE.BufferAttribute(d.terrain.nor, 3));
-  tg.setAttribute('uv', new THREE.BufferAttribute(d.terrain.uv, 2));
-  tg.setAttribute('color', new THREE.BufferAttribute(d.terrain.col, 3));
+  attr(tg, 'position', d.terrain.pos, 3); attr(tg, 'normal', d.terrain.nor, 3); attr(tg, 'uv', d.terrain.uv, 2); attr(tg, 'color', d.terrain.col, 3);
+  tg.computeBoundingSphere();
   const ground = new THREE.Mesh(tg, level === 'far' ? farMaterial(tex) : new THREE.MeshLambertMaterial({ map: tex, vertexColors: true }));
   ground.receiveShadow = level !== 'far';
   if (level === 'far') ground.renderOrder = -1;
@@ -1093,20 +1170,19 @@ function onTile(t, d, level) {
   const tri = (o, mat, shadow) => {
     if (!o || !o.pos.length) return;
     const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.BufferAttribute(o.pos, 3));
-    g.setAttribute('normal', new THREE.BufferAttribute(o.nor, 3));
-    g.setAttribute('color', new THREE.BufferAttribute(o.col, 3));
-    if (o.win) g.setAttribute('win', new THREE.BufferAttribute(o.win, 4));
+    attr(g, 'position', o.pos, 3); attr(g, 'normal', o.nor, 3); attr(g, 'color', o.col, 3);
+    if (o.win) attr(g, 'win', o.win, 4);
+    g.computeBoundingSphere();
     const m = new THREE.Mesh(g, mat); m.castShadow = shadow; m.receiveShadow = true; group.add(m);
   };
   tri(d.roads, roadMat, false); tri(d.marks, markMat, false); tri(d.buildings, buildingMat, true); tri(d.water, waterMat, false);
   if (d.trees) for (const [k, model] of [['dec', TREE_DEC], ['con', TREE_CON]]) {
     const tr = d.trees[k]; if (!tr.n) continue;
-    const im = new THREE.InstancedBufferAttribute(tr.mat, 16);
+    const im = new THREE.InstancedBufferAttribute(tr.mat, 16).onUpload(freeOnUpload);
     for (const [geo, tinted] of [[model.tinted, true], [model.plain, false]]) {
       const mesh = new THREE.InstancedMesh(geo, tinted ? tintMat : plainMat, tr.n);
       mesh.instanceMatrix = im;
-      if (tinted) mesh.instanceColor = new THREE.InstancedBufferAttribute(tr.col, 3);
+      if (tinted) mesh.instanceColor = new THREE.InstancedBufferAttribute(tr.col, 3).onUpload(freeOnUpload);
       mesh.castShadow = true; mesh.receiveShadow = true; mesh.computeBoundingSphere();
       group.add(mesh);
     }
@@ -1117,6 +1193,10 @@ function onTile(t, d, level) {
   scene.add(group);
   if (t.z === NEAR_Z) covMark(t, 255);
 }
+canvas.addEventListener('webglcontextrestored', () => {
+  for (const t of tiles.values()) { disposeGroup(t.group); t.group = null; t.level = null; }
+  covData.fill(0); covTex.needsUpdate = true;
+});
 function disposeGroup(g) {
   if (!g) return;
   scene.remove(g);
