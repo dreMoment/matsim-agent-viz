@@ -1153,7 +1153,7 @@ function attr(g, name, arr, size) {  // byte normals and colours (from the worke
 let failedTiles = 0;
 function onTile(t, d, level) {
   t.pending = null;
-  if (!tiles.has(t.key)) { d.texture?.close?.(); return; }
+  if (tiles.get(t.key) !== t) { d.texture?.close?.(); return; }  // dropped meanwhile (maybe wanted again since)
   if (d.error) { t.failed = (t.failed || 0) + 1; console.warn(`a map tile failed (${++failedTiles} so far):`, d.error); return; }
   const r = tileRect(t.z, t.x, t.y);
   const group = new THREE.Group(); group.position.set(r.X0, 0, r.Z0);
@@ -1209,8 +1209,9 @@ function disposeGroup(g) {
   });
 }
 
-// tiles kept out of range, per zoom: a full near tile takes about 30 MB of GPU memory, a far one about 2 MB
-const KEEP = { [NEAR_Z]: LOW_MEMORY ? 6 : 40, [FAR_Z]: 60 };
+// tiles kept out of range, per zoom: a full near tile takes about 30 MB of GPU memory, a far one about 2 MB.
+// Safari and Firefox don't tell the memory: they get a middle budget (Safari reloads a tab that takes too much).
+const KEEP = { [NEAR_Z]: LOW_MEMORY ? 6 : navigator.deviceMemory ? 40 : 16, [FAR_Z]: 60 };
 const R_SHOW = LOW_MEMORY ? R_LITE : 8000;  // kept near tiles are drawn up to this far from the focus
 function showTile(t, on) {
   t.hidden = !on;
@@ -1241,23 +1242,25 @@ function updateTiles(fx, fz) {
     // upgrade to full when close; a tile once built in full detail stays so
     t.want = t.level === 'full' ? 'full' : w.level;
     if (t.hidden !== false) showTile(t, true);
+    if (t.group) for (const m of t.group.children) if (m.isInstancedMesh) m.visible = true;
   }
   // Tiles out of range are kept, not dropped, so coming back shows them at once. Near tiles stay drawn up to
-  // R_SHOW, for detail towards the horizon, and are hidden beyond. Past KEEP kept tiles of a zoom, the ones
-  // that left the range longest ago are dropped.
-  const now = performance.now(), kept = { [NEAR_Z]: [], [FAR_Z]: [] };
+  // R_SHOW, for detail towards the horizon, and are hidden beyond. Past KEEP kept tiles of a zoom, the
+  // farthest are dropped.
+  const kept = { [NEAR_Z]: [], [FAR_Z]: [] };
   for (const [key, t] of tiles) {
-    if (wanted.has(key)) { t.leftAt = null; continue; }
+    if (wanted.has(key)) continue;
     t.want = null;
     if (!t.group && !t.pending) { tiles.delete(key); continue; }
-    t.leftAt ??= now;
     const r = tileRect(t.z, t.x, t.y), d = Math.hypot(Math.max(r.X0 - fx, 0, fx - r.X0 - r.S), Math.max(r.Z0 - fz, 0, fz - r.Z0 - r.S));
+    t.d = d;
     const show = t.z === NEAR_Z && d < R_SHOW;
     if (t.hidden === show) showTile(t, show);
+    if (t.group) for (const m of t.group.children) if (m.isInstancedMesh) m.visible = d < R_LITE;  // trees: under a pixel past R_LITE
     kept[t.z].push(t);
   }
   for (const z of [NEAR_Z, FAR_Z]) {
-    const list = kept[z].sort((a, b) => b.leftAt - a.leftAt);
+    const list = kept[z].sort((a, b) => a.d - b.d);  // the farthest go first
     for (const t of list.slice(KEEP[z])) { if (z === NEAR_Z) covMark(t, 0); disposeGroup(t.group); t.group = null; tiles.delete(t.key); }
   }
   const queue = [...tiles.values()].filter(t => !t.pending && t.want && t.want !== t.level && (t.failed || 0) < 3)

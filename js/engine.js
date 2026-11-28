@@ -930,17 +930,18 @@ async function railTracks(hops, stops, crs, env) {
   chosen.sort((p, q) => p[0] - q[0] || p[1] - q[1]);
   // two at a time: Overpass serves two requests at once from one address, and refuses a third
   const got = new Array(chosen.length).fill(null);
-  let next = 0, n = 0;
+  let next = 0, n = 0, failed = false;  // after a failure (offline, Overpass down), the rest would fail too
   const fetchTiles = async () => {
-    while (next < chosen.length) {
+    while (!failed && next < chosen.length) {
       const i = next++;
       env.progress({ step: `Rail tracks: tile ${Math.min(++n, chosen.length)} of ${chosen.length}` });
       got[i] = await railTile(chosen[i][0], chosen[i][1], env);
+      if (!got[i]) failed = true;
     }
   };
   await Promise.all([fetchTiles(), fetchTiles()]);
   const data = got.filter(Boolean);
-  if (data.length < chosen.length) env.say("note: trains and trams move in straight lines between stops where tracks are missing");
+  if (failed) env.say("note: trains and trams move in straight lines between stops where tracks are missing");
   if (!data.length) return new Map();
   env.progress({ step: "Routing trains on the tracks" });
   const graph = new RailGraph(data, crs);
@@ -982,7 +983,7 @@ const CLOSED = new Set(["no", "private"]);
 export const isWalk = mode => mode.toLowerCase().includes("walk");
 export const isBike = mode => /bike|bicycle|cycl/.test(mode.toLowerCase());
 
-/** One layer of a Mapbox vector tile (protobuf): its extent and features [{type, tags, geom: [[x, y, ...], ...]}]. */
+/** One layer of a Mapbox vector tile (protobuf): its extent and features [{type, props, geom: [[x, y, ...], ...]}]. */
 export function readMvtLayer(buf, name) {
   const b = new Uint8Array(buf), view = new DataView(b.buffer, b.byteOffset, b.byteLength), text = new TextDecoder();
   let pos = 0;
@@ -1072,7 +1073,7 @@ function clipToTile(line, E) {
 }
 
 /** The walkable ways of vector tile x, y (zoom PATH_Z), cached as kind "paths" (public OSM data, no run data):
- * {p: [x, y, ...] in tile units (0 to 4096), w: [[closed to bikes 0/1, point, point, ...], ...]}. null if offline. */
+ * {p: [x, y, ...] in tile units (0 to 4096), w: [[closed to bikes 0/1, point, point, ...], ...]}. Throws if offline. */
 const tileUrls = new WeakMap();  // env -> the tile set's current URL template (it changes with each weekly release)
 export async function pathTile(x, y, env) {
   const key = `${x}_${y}`;
@@ -1080,40 +1081,45 @@ export async function pathTile(x, y, env) {
   if (cached) {
     try { return JSON.parse(cached); } catch { /* broken cache entry: download again */ }
   }
-  try {
-    if (!tileUrls.has(env)) tileUrls.set(env, env.fetch(OPENFREEMAP).then(r => r.json()).then(j => j.tiles[0]));
-    const url = (await tileUrls.get(env)).replace("{z}", PATH_Z).replace("{x}", x).replace("{y}", y);
-    const r = await env.fetch(url);
-    if (!r.ok && r.status !== 404) throw new Error(`HTTP ${r.status}`);
-    const { extent, features } = r.ok ? readMvtLayer(await r.arrayBuffer(), "transportation") : { features: [] };
-    const sc = 4096 / (extent || 4096), p = [], w = [], at = new Map();
-    const point = (px, py) => {
-      px = Math.round(px * sc * 100) / 100; py = Math.round(py * sc * 100) / 100;
-      const k = px + "," + py;
-      let i = at.get(k);
-      if (i === undefined) { at.set(k, i = p.length / 2); p.push(px, py); }
-      return i;
-    };
-    for (const { props: t, geom } of features) {
-      const c = t.class, sub = t.subclass;
-      if (!(c === "path" ? WALK_PATHS.has(sub) : WALK_STREETS.has(c))) continue;
-      if (CLOSED.has(t.foot) || CLOSED.has(t.access)) continue;
-      const noBike = (c === "path" && NO_BIKE_WAYS.has(sub) && !["yes", "designated", "permissive"].includes(t.bicycle)) ||
-        ["no", "dismount", "use_sidepath"].includes(t.bicycle);
-      for (const line of geom) for (const piece of clipToTile(line, extent)) {
-        const way = [noBike ? 1 : 0];
-        for (let k = 0; k < piece.length; k += 2) way.push(point(piece[k], piece[k + 1]));
-        w.push(way);
-      }
-    }
-    joinJunctions(p, w);
-    const data = { p, w }, text = JSON.stringify(data);
-    await env.cache?.put("paths", key, text).catch(() => {});
-    return data;
-  } catch (e) {
-    env.say(`note: could not download footpaths (${e.message || e})`);
-    return null;
+  if (!tileUrls.has(env)) {
+    tileUrls.set(env, env.fetch(OPENFREEMAP).then(async r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const url = (await r.json()).tiles?.[0];
+      if (!url) throw new Error("no tile address");
+      return url;
+    }).catch(e => { tileUrls.delete(env); throw e; }));
   }
+  const url = (await tileUrls.get(env)).replace("{z}", PATH_Z).replace("{x}", x).replace("{y}", y);
+  const r = await env.fetch(url);
+  if (!r.ok && r.status !== 404) throw new Error(`HTTP ${r.status}`);
+  const { extent, features } = r.ok ? readMvtLayer(await r.arrayBuffer(), "transportation") : { features: [] };
+  const sc = 4096 / (extent || 4096), p = [], w = [], at = new Map();
+  const point = (px, py) => {
+    px = Math.round(px * sc * 100) / 100; py = Math.round(py * sc * 100) / 100;
+    const k = px + "," + py;
+    let i = at.get(k);
+    if (i === undefined) { at.set(k, i = p.length / 2); p.push(px, py); }
+    return i;
+  };
+  for (const { props: t, geom } of features) {
+    const c = t.class, sub = t.subclass;
+    if (!(c === "path" ? WALK_PATHS.has(sub) : WALK_STREETS.has(c))) continue;
+    if (CLOSED.has(t.foot) || CLOSED.has(t.access)) continue;
+    const noBike = (c === "path" && NO_BIKE_WAYS.has(sub) && !["yes", "designated", "permissive"].includes(t.bicycle)) ||
+      ["no", "dismount", "use_sidepath"].includes(t.bicycle);
+    for (const line of geom) for (const piece of clipToTile(line, extent)) {
+      const way = [noBike ? 1 : 0];
+      for (let k = 0; k < piece.length; k += 2) {
+        const n = point(piece[k], piece[k + 1]);
+        if (n !== way[way.length - 1] || way.length === 1) way.push(n);
+      }
+      if (way.length > 2) w.push(way);
+    }
+  }
+  joinJunctions(p, w);
+  const data = { p, w }, text = JSON.stringify(data);
+  await env.cache?.put("paths", key, text).catch(() => {});
+  return data;
 }
 
 /** The tiles keep a junction only as a point of one of its ways when the other way runs straight through it
@@ -1148,7 +1154,7 @@ function joinJunctions(p, w) {
     const list = grid.get(cell(Math.floor(x / CELL_U), Math.floor(y / CELL_U))) ?? [];
     for (let i = 0; i < list.length; i += 2) {
       const wi = list[i], k = list[i + 1], way = w[wi], a = way[k], b = way[k + 1];
-      if (a === n || b === n || way.includes(n)) continue;
+      if (way.includes(n, 1)) continue;  // way[0] is the bike flag, not a point
       const ax = p[2 * a], ay = p[2 * a + 1], dx = p[2 * b] - ax, dy = p[2 * b + 1] - ay, l2 = dx * dx + dy * dy;
       if (!l2) continue;
       const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2)), d = hypot(ax + dx * t - x, ay + dy * t - y);
@@ -1268,17 +1274,17 @@ async function walkTracks(legs, crs, env) {
   if (count.size > MAX_PATH_TILES) env.say(`note: the walks cover ${count.size} map tiles; the ${MAX_PATH_TILES} ` +
     "with most walks and rides get paths, the others stay straight");
   const tiles = [], loaded = new Set();
-  let next = 0, got = 0;
+  let next = 0, got = 0, failed = null;  // after a failure (offline), the rest would fail too
   const worker = async () => {
-    while (next < chosen.length) {
+    while (!failed && next < chosen.length) {
       const [i, j] = chosen[next++];
-      const tile = await pathTile(i, j, env);
-      env.progress({ step: `Footpaths: tile ${++got} of ${chosen.length}`, fraction: got / chosen.length });
+      const tile = await pathTile(i, j, env).catch(e => { failed ??= e; return null; });
+      env.progress({ step: `Footpaths: tile ${++got} of ${chosen.length}` });
       if (tile) { tiles.push([i, j, tile]); loaded.add(`${i}_${j}`); }
     }
   };
   await Promise.all(Array.from({ length: PATH_FETCHES }, worker));
-  if (loaded.size < chosen.length) env.say("note: walks and rides where footpaths are missing stay straight");
+  if (failed) env.say(`note: could not download footpaths (${failed.message || failed}); walks and rides where they are missing stay straight`);
   walks = walks.filter((_, k) => need[k].every(t => loaded.has(t)));
   if (!tiles.length || !walks.length) return new Map();
   tiles.sort((p, q) => p[0] - q[0] || p[1] - q[1]);  // as chosen, whatever order they came in
