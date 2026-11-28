@@ -1129,7 +1129,7 @@ function covRecentre(tx, ty) {
   const r = tileRect(NEAR_Z, covOX, covOY);
   covU.covRect.value.set(r.X0, r.Z0, r.S * COV_N, r.S * COV_N);
   covData.fill(0);
-  for (const t of tiles.values()) if (t.z === NEAR_Z && t.group) covMark(t, 255);
+  for (const t of tiles.values()) if (t.z === NEAR_Z && t.group && !t.hidden) covMark(t, 255);
 }
 function covMark(t, v) {
   const i = t.x - covOX, j = t.y - covOY;
@@ -1191,7 +1191,8 @@ function onTile(t, d, level) {
   t.group = group; t.level = level; t.N = d.N; t.h = d.heights; t.S = r.S; t.X0 = r.X0; t.Z0 = r.Z0;
   t.deckH = d.deckH || null; t.deckD = d.deckD || null;
   scene.add(group);
-  if (t.z === NEAR_Z) covMark(t, 255);
+  group.visible = !t.hidden;
+  if (t.z === NEAR_Z && !t.hidden) covMark(t, 255);
 }
 canvas.addEventListener('webglcontextrestored', () => {
   for (const t of tiles.values()) { disposeGroup(t.group); t.group = null; t.level = null; }
@@ -1208,6 +1209,13 @@ function disposeGroup(g) {
   });
 }
 
+// hidden tiles kept per zoom: a full near tile takes about 30 MB of GPU memory, a far one about 2 MB
+const KEEP = { [NEAR_Z]: LOW_MEMORY ? 6 : 40, [FAR_Z]: 60 };
+function showTile(t, on) {
+  t.hidden = !on;
+  if (t.group) t.group.visible = on;
+  if (t.z === NEAR_Z && t.group) covMark(t, on ? 255 : 0);
+}
 function updateTiles(fx, fz) {
   if (!tileTemplate) return;
   const [cx, cy] = tileAt(NEAR_Z, fx, fz);
@@ -1229,14 +1237,23 @@ function updateTiles(fx, fz) {
     let t = tiles.get(key);
     if (!t) { t = { key, z: w.z, x: w.x, y: w.y, group: null, level: null, pending: null }; tiles.set(key, t); }
     t.d = w.d;
-    // upgrade to full when close; keep full detail until it is well out of range
-    t.want = w.level === 'lite' && t.level === 'full' && w.d < R_FULL * 1.5 ? 'full' : w.level;
+    // upgrade to full when close; a tile once built in full detail stays so
+    t.want = t.level === 'full' ? 'full' : w.level;
+    if (t.hidden) showTile(t, true);
   }
+  // Tiles out of range are hidden, not dropped, so coming back shows them at once. Past KEEP hidden tiles
+  // of a zoom, the ones hidden longest ago are dropped.
+  const now = performance.now(), hidden = { [NEAR_Z]: [], [FAR_Z]: [] };
   for (const [key, t] of tiles) {
     if (wanted.has(key)) continue;
-    const r = tileRect(t.z, t.x, t.y), d = Math.hypot(r.X0 + r.S / 2 - fx, r.Z0 + r.S / 2 - fz);
-    if (d < (t.z === NEAR_Z ? R_LITE * 1.3 + r.S : R_FAR * 1.2)) continue;
-    disposeGroup(t.group); if (t.z === NEAR_Z) covMark(t, 0); tiles.delete(key);
+    t.want = null;
+    if (!t.group && !t.pending) { tiles.delete(key); continue; }
+    if (!t.hidden) { showTile(t, false); t.hiddenAt = now; }
+    hidden[t.z].push(t);
+  }
+  for (const z of [NEAR_Z, FAR_Z]) {
+    const list = hidden[z].sort((a, b) => b.hiddenAt - a.hiddenAt);
+    for (const t of list.slice(KEEP[z])) { disposeGroup(t.group); t.group = null; tiles.delete(t.key); }
   }
   const queue = [...tiles.values()].filter(t => !t.pending && t.want && t.want !== t.level && (t.failed || 0) < 3)
     .sort((a, b) => (a.z === NEAR_Z ? a.d : a.d * 0.35 + 600) - (b.z === NEAR_Z ? b.d : b.d * 0.35 + 600));
