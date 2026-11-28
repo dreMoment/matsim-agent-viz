@@ -87,7 +87,7 @@ async function sharingNearby(dir, config, configPath) {
 const titleFolder = dir => path.resolve(dir).split(path.sep)
   .filter(p => p && !["simulation_output", "output"].includes(p.toLowerCase())).pop() ?? "";
 
-// OpenStreetMap tiles, gzipped JSON in ~/.cache/matsim-agent-viz/{rail,walk}/LAT_LON.json.gz
+// OpenStreetMap tiles, gzipped JSON in ~/.cache/matsim-agent-viz/{rail,paths}/KEY.json.gz
 const CACHE_DIR = path.join(os.homedir(), ".cache", "matsim-agent-viz");
 const cache = {
   async get(kind, key) {

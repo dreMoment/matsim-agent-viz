@@ -11,13 +11,14 @@
 //     network and wait at stops;
 //   * trains and trams: between two stops, along the railway tracks of OpenStreetMap (downloaded from
 //     Overpass by tile, then cached), because their network links are often straight lines;
-//   * walks: along OpenStreetMap footpaths and streets, keeping MATSim's start and end times;
+//   * walks: along OpenStreetMap footpaths and streets (from OpenFreeMap's vector tiles), keeping MATSim's start
+//     and end times;
 //   * teleported bikes (bike, PubliBike, ...): the same way, on streets and cycleways, off footways and steps;
 //   * car passengers: the fastest path on the run's car links, like the cars;
 //   * other teleported modes: a straight line from start to end at constant speed;
 //   * agents are sampled with a stable hash of the person id.
 //
-// Only tile bounds go out (to Overpass), never run data. Messages are counts only: no ids, coordinates or records.
+// Only tile bounds and addresses go out (to Overpass and OpenFreeMap), never run data. Messages are counts only: no ids, coordinates or records.
 //
 // The caller passes `env`:
 //   proj4                                  the proj4 library
@@ -25,7 +26,7 @@
 //   progress({step, fraction, reading})    how far the build is
 //   cache: {get(kind, key), put(kind, key, text)}   OpenStreetMap tiles (public data), may be missing
 //   shared: {get(kind, key)}               ready-made tiles published with the site (tools/osm-tiles.mjs), may be missing
-//   fetch                                  for Overpass and epsg.io
+//   fetch                                  for Overpass, OpenFreeMap and epsg.io
 
 export const MIN_POINT_GAP_S = 10;  // thin out link events closer together than this ...
 export const MERGE_TOL_M = 8.0;     // ... but only where the dropped point lies this close to the path, so turns stay
@@ -927,16 +928,19 @@ async function railTracks(hops, stops, crs, env) {
     chosen = countTop(count, MAX_RAIL_TILES).map(k => at.get(k));
   }
   chosen.sort((p, q) => p[0] - q[0] || p[1] - q[1]);
-  const data = [];
-  for (let i = 0; i < chosen.length; i++) {
-    env.progress({ step: `Rail tracks: tile ${i + 1} of ${chosen.length}` });
-    const tile = await railTile(chosen[i][0], chosen[i][1], env);
-    if (!tile) {
-      env.say("note: trains and trams move in straight lines between stops where tracks are missing");
-      break;
+  // two at a time: Overpass serves two requests at once from one address, and refuses a third
+  const got = new Array(chosen.length).fill(null);
+  let next = 0, n = 0;
+  const fetchTiles = async () => {
+    while (next < chosen.length) {
+      const i = next++;
+      env.progress({ step: `Rail tracks: tile ${Math.min(++n, chosen.length)} of ${chosen.length}` });
+      got[i] = await railTile(chosen[i][0], chosen[i][1], env);
     }
-    data.push(tile);
-  }
+  };
+  await Promise.all([fetchTiles(), fetchTiles()]);
+  const data = got.filter(Boolean);
+  if (data.length < chosen.length) env.say("note: trains and trams move in straight lines between stops where tracks are missing");
   if (!data.length) return new Map();
   env.progress({ step: "Routing trains on the tracks" });
   const graph = new RailGraph(data, crs);
@@ -950,15 +954,17 @@ async function railTracks(hops, stops, crs, env) {
 
 // ---------------------------------------------------------------- footpaths and bike paths
 // MATSim teleports walkers, and usually cyclists: it knows only where and when a leg starts and ends. To
-// draw them on the street, the tool downloads the walkable ways of OpenStreetMap (footways, pedestrian
-// zones, steps, paths and streets) in small tiles where sampled agents walk or ride, and gives each leg
-// its shortest path. Bikes use the same tiles; the query also lists the ways closed to bikes (footways,
-// steps and the like, unless signed for bikes), which a bike takes only for a short cut-through.
-// The start and end times stay MATSim's; only the shape changes.
-const WALK_WAYS = "footway|pedestrian|path|steps|living_street|residential|service|unclassified|track|cycleway|" +
-  "corridor|platform|tertiary|tertiary_link|secondary|secondary_link|primary|primary_link";
-export const WALK_TILE = 0.05;     // degrees: about 5.5 x 3.8 km in Switzerland
-const MAX_WALK_TILES = 40;  // the tiles with most walks get paths, the other walks stay straight
+// draw them on the street, the tool takes the walkable ways of OpenStreetMap (footways, pedestrian zones,
+// steps, paths and streets) from OpenFreeMap's vector tiles, the same tiles the maps draw, where sampled
+// agents walk or ride, and gives each leg its shortest path. Bikes use the same ways; footways, steps and
+// the like, unless signed for bikes, count NO_BIKE_COST times their length, so a bike takes them only for a
+// short cut-through. The start and end times stay MATSim's; only the shape changes.
+// The tiles come from a CDN in a fraction of a second each (Overpass took half a minute or more per tile).
+export const OPENFREEMAP = "https://tiles.openfreemap.org/planet";
+export const PATH_Z = 14;     // vector tile zoom: tiles of about 1.7 x 1.7 km in Switzerland, ways at full detail
+const MAX_PATH_TILES = 300;   // the tiles with most walks get paths, the other walks stay straight
+const PATH_FETCHES = 8;       // tiles downloaded at once
+const EDGE_JOIN_M = 1.0;      // a way cut at a tile edge joins the piece across the edge this close
 const WALK_SNAP_M = 250;    // a walk's start or end looks for a path this close
 const WALK_STEP_M = 25;     // long path segments get extra points this far apart, so start and end snap close
 const MIN_PART_NODES = 200; // walks snap only to connected networks this big (~5 km of path), not to cut-off bits
@@ -966,58 +972,251 @@ const MAX_WALK_M = 5000;    // longer walks stay straight
 const MAX_BIKE_M = 15000;   // longer rides stay straight
 const NO_BIKE_COST = 5;     // cost factor for a bike on a way closed to bikes (pushed, or not at all)
 const WALK_SIMPLIFY_M = 5.0;
-const NO_BIKE_WAYS = "footway|pedestrian|steps|corridor|platform";
+// walkable ways in the tiles' OpenMapTiles schema: path subclasses (footway, steps, ...) and street classes
+// (minor: residential, unclassified, living street; *_link roads come as their class with ramp=1)
+const WALK_PATHS = new Set(["footway", "pedestrian", "path", "steps", "cycleway", "corridor", "platform"]);
+const WALK_STREETS = new Set(["minor", "service", "track", "tertiary", "secondary", "primary"]);
+const NO_BIKE_WAYS = new Set(["footway", "pedestrian", "steps", "corridor", "platform"]);
+const CLOSED = new Set(["no", "private"]);
 
 export const isWalk = mode => mode.toLowerCase().includes("walk");
 export const isBike = mode => /bike|bicycle|cycl/.test(mode.toLowerCase());
 
-export function walkQuery(i, j) {
-  const r = v => Math.round(v * 1e4) / 1e4;
-  const s = r(i * WALK_TILE), w = r(j * WALK_TILE), n = r(s + WALK_TILE), e = r(w + WALK_TILE);
-  return `[out:json][timeout:240];way["highway"~"^(${WALK_WAYS})$"]["foot"!~"^(no|private)$"]` +
-    `["access"!~"^(no|private)$"](${s},${w},${n},${e})->.w;.w out skel qt;node(w.w);out skel qt;` +
-    `(way.w["highway"~"^(${NO_BIKE_WAYS})$"]["bicycle"!~"^(yes|designated|permissive)$"];` +
-    `way.w["bicycle"~"^(no|dismount|use_sidepath)$"];);out ids qt;`;  // the ways closed to bikes, ids only
+/** One layer of a Mapbox vector tile (protobuf): its extent and features [{type, tags, geom: [[x, y, ...], ...]}]. */
+export function readMvtLayer(buf, name) {
+  const b = new Uint8Array(buf), view = new DataView(b.buffer, b.byteOffset, b.byteLength), text = new TextDecoder();
+  let pos = 0;
+  const varint = () => { let v = 0, s = 1, c; do { c = b[pos++]; v += (c & 127) * s; s *= 128; } while (c & 128); return v; };
+  const fields = (end, f) => {  // f(field, wire type, value or end of the field's bytes); pos is restored after each
+    while (pos < end) {
+      const key = varint(), field = Math.floor(key / 8), wt = key % 8;
+      if (wt === 0) f(field, 0, varint());
+      else if (wt === 2) { const e = varint() + pos; f(field, 2, e); pos = e; }
+      else if (wt === 1) { const p = pos; f(field, 1, p); pos = p + 8; }
+      else if (wt === 5) { const p = pos; f(field, 5, p); pos = p + 4; }
+      else throw new Error("not a vector tile");
+    }
+  };
+  const packed = end => { const out = []; while (pos < end) out.push(varint()); return out; };
+  let found = null;
+  fields(b.length, (field, wt, end) => {
+    if (field !== 3 || wt !== 2 || found) return;
+    const layer = { extent: 4096, keys: [], values: [], feats: [], name: null };
+    fields(end, (f, w, e) => {
+      if (f === 1) layer.name = text.decode(b.subarray(pos, e));
+      else if (f === 2) layer.feats.push([pos, e]);
+      else if (f === 3) layer.keys.push(text.decode(b.subarray(pos, e)));
+      else if (f === 5) layer.extent = e;
+      else if (f === 4) {
+        let v = null;
+        fields(e, (vf, vw, ve) => {
+          if (vf === 1) v = text.decode(b.subarray(pos, ve));
+          else if (vf === 2) v = view.getFloat32(ve, true);
+          else if (vf === 3) v = view.getFloat64(ve, true);
+          else if (vf === 4 || vf === 5) v = ve;
+          else if (vf === 6) v = ve % 2 ? -(ve + 1) / 2 : ve / 2;
+          else if (vf === 7) v = !!ve;
+        });
+        layer.values.push(v);
+      }
+    });
+    if (layer.name === name) found = layer;
+  });
+  if (!found) return { extent: 4096, features: [] };
+  const features = found.feats.map(([start, end]) => {
+    pos = start;
+    let type = 0, tags = [], cmds = [];
+    fields(end, (f, w, e) => {
+      if (f === 3) type = e;
+      else if (f === 2) tags = packed(e);
+      else if (f === 4) cmds = packed(e);
+    });
+    const props = {};
+    for (let k = 0; k + 1 < tags.length; k += 2) props[found.keys[tags[k]]] = found.values[tags[k + 1]];
+    const geom = [];
+    let x = 0, y = 0, ring = null;
+    const zz = n => n % 2 ? -(n + 1) / 2 : n / 2;
+    for (let i = 0; i < cmds.length;) {
+      const c = cmds[i++], id = c & 7, n = c >> 3;
+      if (id === 7) { if (ring && ring.length >= 2) ring.push(ring[0], ring[1]); continue; }  // close path
+      for (let k = 0; k < n; k++) {
+        x += zz(cmds[i++]); y += zz(cmds[i++]);
+        if (id === 1) geom.push(ring = []);
+        ring.push(x, y);
+      }
+    }
+    return { type, props, geom };
+  });
+  return { extent: found.extent, features };
 }
 
-export function walkTile(i, j, env) {
-  return osmTile("walk", `${i}_${j}`, walkQuery(i, j), "footpaths", env);
+/** Pieces of the line [x, y, ...] inside the square [0, E]², cut exactly at its edges. */
+function clipToTile(line, E) {
+  const pieces = [];
+  let cur = null;
+  for (let k = 0; k + 3 < line.length; k += 2) {
+    const ax = line[k], ay = line[k + 1], dx = line[k + 2] - ax, dy = line[k + 3] - ay;
+    let t0 = 0, t1 = 1;
+    for (const [p, q] of [[-dx, ax], [dx, E - ax], [-dy, ay], [dy, E - ay]]) {  // Liang-Barsky
+      if (p === 0) { if (q < 0) { t0 = 1; t1 = 0; } continue; }
+      const r = q / p;
+      if (p < 0) t0 = Math.max(t0, r); else t1 = Math.min(t1, r);
+    }
+    if (t0 > t1) { cur = null; continue; }
+    const s = [ax + dx * t0, ay + dy * t0], e = [ax + dx * t1, ay + dy * t1];
+    if (!cur || t0 > 0) pieces.push(cur = [s[0], s[1]]);
+    cur.push(e[0], e[1]);
+    if (t1 < 1) cur = null;
+  }
+  return pieces.filter(p => p.length >= 4);
+}
+
+/** The walkable ways of vector tile x, y (zoom PATH_Z), cached as kind "paths" (public OSM data, no run data):
+ * {p: [x, y, ...] in tile units (0 to 4096), w: [[closed to bikes 0/1, point, point, ...], ...]}. null if offline. */
+const tileUrls = new WeakMap();  // env -> the tile set's current URL template (it changes with each weekly release)
+export async function pathTile(x, y, env) {
+  const key = `${x}_${y}`;
+  const cached = await env.cache?.get("paths", key).catch(() => null);
+  if (cached) {
+    try { return JSON.parse(cached); } catch { /* broken cache entry: download again */ }
+  }
+  try {
+    if (!tileUrls.has(env)) tileUrls.set(env, env.fetch(OPENFREEMAP).then(r => r.json()).then(j => j.tiles[0]));
+    const url = (await tileUrls.get(env)).replace("{z}", PATH_Z).replace("{x}", x).replace("{y}", y);
+    const r = await env.fetch(url);
+    if (!r.ok && r.status !== 404) throw new Error(`HTTP ${r.status}`);
+    const { extent, features } = r.ok ? readMvtLayer(await r.arrayBuffer(), "transportation") : { features: [] };
+    const sc = 4096 / (extent || 4096), p = [], w = [], at = new Map();
+    const point = (px, py) => {
+      px = Math.round(px * sc * 100) / 100; py = Math.round(py * sc * 100) / 100;
+      const k = px + "," + py;
+      let i = at.get(k);
+      if (i === undefined) { at.set(k, i = p.length / 2); p.push(px, py); }
+      return i;
+    };
+    for (const { props: t, geom } of features) {
+      const c = t.class, sub = t.subclass;
+      if (!(c === "path" ? WALK_PATHS.has(sub) : WALK_STREETS.has(c))) continue;
+      if (CLOSED.has(t.foot) || CLOSED.has(t.access)) continue;
+      const noBike = (c === "path" && NO_BIKE_WAYS.has(sub) && !["yes", "designated", "permissive"].includes(t.bicycle)) ||
+        ["no", "dismount", "use_sidepath"].includes(t.bicycle);
+      for (const line of geom) for (const piece of clipToTile(line, extent)) {
+        const way = [noBike ? 1 : 0];
+        for (let k = 0; k < piece.length; k += 2) way.push(point(piece[k], piece[k + 1]));
+        w.push(way);
+      }
+    }
+    joinJunctions(p, w);
+    const data = { p, w }, text = JSON.stringify(data);
+    await env.cache?.put("paths", key, text).catch(() => {});
+    return data;
+  } catch (e) {
+    env.say(`note: could not download footpaths (${e.message || e})`);
+    return null;
+  }
+}
+
+/** The tiles keep a junction only as a point of one of its ways when the other way runs straight through it
+ * (the tile maker drops points that don't change a line's shape), so the ways don't meet there. Puts such a
+ * point back into the way it lies on: any point this close to another way (JUNCTION_U, about 0.3 m), and a
+ * way's dead end up to DEAD_END_U (about 1 m) away. p: [x, y, ...] points, w: [[flag, point, ...], ...] ways. */
+const JUNCTION_U = 0.75, DEAD_END_U = 2.5, CELL_U = 8;  // tile units of 1/4096 of a tile, about 0.4 m at zoom 14
+function joinJunctions(p, w) {
+  const ends = new Map();  // point -> times it ends a way (a dead end ends one and is on no other way)
+  const on = new Map();    // point -> times it is on a way
+  for (const way of w) for (let k = 1; k < way.length; k++) {
+    const n = way[k];
+    on.set(n, (on.get(n) ?? 0) + 1);
+    if (k === 1 || k === way.length - 1) ends.set(n, (ends.get(n) ?? 0) + 1);
+  }
+  const grid = new Map(), cell = (cx, cy) => cx * 65536 + cy;
+  w.forEach((way, wi) => {
+    for (let k = 1; k + 1 < way.length; k++) {
+      const a = way[k], b = way[k + 1];
+      const x0 = Math.min(p[2 * a], p[2 * b]) - DEAD_END_U, x1 = Math.max(p[2 * a], p[2 * b]) + DEAD_END_U;
+      const y0 = Math.min(p[2 * a + 1], p[2 * b + 1]) - DEAD_END_U, y1 = Math.max(p[2 * a + 1], p[2 * b + 1]) + DEAD_END_U;
+      for (let cx = Math.floor(x0 / CELL_U); cx <= Math.floor(x1 / CELL_U); cx++)
+        for (let cy = Math.floor(y0 / CELL_U); cy <= Math.floor(y1 / CELL_U); cy++) {
+          const c = cell(cx, cy); (grid.get(c) ?? grid.set(c, []).get(c)).push(wi, k);
+        }
+    }
+  });
+  const inserts = new Map();  // way * 65536 + segment -> [[t, point], ...]
+  for (const [n, count] of on) {
+    const x = p[2 * n], y = p[2 * n + 1], tol = count === 1 && ends.get(n) === 1 ? DEAD_END_U : JUNCTION_U;
+    let best = null;
+    const list = grid.get(cell(Math.floor(x / CELL_U), Math.floor(y / CELL_U))) ?? [];
+    for (let i = 0; i < list.length; i += 2) {
+      const wi = list[i], k = list[i + 1], way = w[wi], a = way[k], b = way[k + 1];
+      if (a === n || b === n || way.includes(n)) continue;
+      const ax = p[2 * a], ay = p[2 * a + 1], dx = p[2 * b] - ax, dy = p[2 * b + 1] - ay, l2 = dx * dx + dy * dy;
+      if (!l2) continue;
+      const t = Math.max(0, Math.min(1, ((x - ax) * dx + (y - ay) * dy) / l2)), d = hypot(ax + dx * t - x, ay + dy * t - y);
+      if (d <= tol && (!best || d < best[0])) best = [d, wi, k, t];
+    }
+    if (best) { const key = best[1] * 65536 + best[2]; (inserts.get(key) ?? inserts.set(key, []).get(key)).push([best[3], n]); }
+  }
+  const byWay = new Map();
+  for (const [key, list] of inserts) {
+    const wi = Math.floor(key / 65536);
+    (byWay.get(wi) ?? byWay.set(wi, []).get(wi)).push([key - wi * 65536, list.sort((a, b) => a[0] - b[0])]);
+  }
+  for (const [wi, segs] of byWay) {
+    const way = w[wi];
+    segs.sort((a, b) => b[0] - a[0]);  // from the end, so earlier positions stay valid
+    for (const [k, list] of segs) way.splice(k + 1, 0, ...list.map(e => e[1]));
+  }
 }
 
 /** Walkable ways as two undirected graphs in the run's coordinates: for walkers, and for bikes (ways
- * closed to bikes cost NO_BIKE_COST times their length). */
+ * closed to bikes cost NO_BIKE_COST times their length). tiles: [[x, y, pathTile data], ...]. */
 function walkGraph(tiles, crs) {
-  const ids = new Map(), ways = new Map(), noBike = new Set(), x = [], y = [];
-  for (const data of tiles) {
-    for (const el of data.elements ?? []) {
-      if (el.type === "node") {
-        if (!ids.has(el.id)) {
-          ids.set(el.id, x.length);
-          const p = crs.fromWgs([el.lon, el.lat]);
-          x.push(p[0]); y.push(p[1]);
+  const ids = new Map(), x = [], y = [], edge = [], W = 4096 * 2 ** PATH_Z;
+  const edges = [];  // a, b, closed to bikes (0/1), flat
+  for (const [tx, ty, data] of tiles) {
+    const idx = [];
+    for (let k = 0; k < data.p.length; k += 2) {
+      const px = data.p[k], py = data.p[k + 1], gx = tx * 4096 + px, gy = ty * 4096 + py, key = gx + "," + gy;
+      let n = ids.get(key);
+      if (n === undefined) {
+        ids.set(key, n = x.length);
+        const lon = gx / W * 360 - 180, lat = Math.atan(Math.sinh(Math.PI * (1 - 2 * gy / W))) * 180 / Math.PI;
+        const q = crs.fromWgs([lon, lat]);
+        x.push(q[0]); y.push(q[1]);
+        if (px === 0 || py === 0 || px === 4096 || py === 4096) edge.push(n);  // cut at the tile edge
+      }
+      idx.push(n);
+    }
+    for (const way of data.w) {
+      const nb = way[0];
+      for (let k = 1; k + 1 < way.length; k++) {
+        let u = idx[way[k]];
+        const v = idx[way[k + 1]];
+        if (u === v) continue;
+        const d = hypot(x[v] - x[u], y[v] - y[u]);
+        const steps = Math.floor(d / WALK_STEP_M);
+        const x0 = x[u], y0 = y[u], dx = x[v] - x[u], dy = y[v] - y[u];
+        for (let s = 1; s <= steps; s++) {  // extra points on long segments, evenly spaced
+          const f = s / (steps + 1);
+          x.push(x0 + dx * f); y.push(y0 + dy * f);
+          edges.push(u, x.length - 1, nb); u = x.length - 1;
         }
-      } else if (el.type === "way") {
-        if (el.nodes) ways.set(el.id, el.nodes);
-        else noBike.add(el.id);  // listed again without nodes: closed to bikes
+        edges.push(u, v, nb);
       }
     }
   }
-  const edges = [];  // a, b, closed to bikes (0/1), flat
-  for (const [id, refs] of ways) {
-    const nb = noBike.has(id) ? 1 : 0;
-    const r = refs.filter(n => ids.has(n)).map(n => ids.get(n));
-    for (let k = 0; k + 1 < r.length; k++) {
-      let u = r[k];
-      const v = r[k + 1];
-      const d = hypot(x[v] - x[u], y[v] - y[u]);
-      const steps = Math.floor(d / WALK_STEP_M);
-      const x0 = x[u], y0 = y[u], dx = x[v] - x[u], dy = y[v] - y[u];
-      for (let s = 1; s <= steps; s++) {  // extra points on long segments, evenly spaced
-        const f = s / (steps + 1);
-        x.push(x0 + dx * f); y.push(y0 + dy * f);
-        edges.push(u, x.length - 1, nb); u = x.length - 1;
+  // A way that crosses a tile edge is cut there in both tiles, at points a few centimetres apart: join them.
+  const cells = new Map(), cellOf = (cx, cy) => `${cx},${cy}`;
+  for (const n of edge) {
+    const k = cellOf(Math.floor(x[n] / EDGE_JOIN_M), Math.floor(y[n] / EDGE_JOIN_M));
+    (cells.get(k) ?? cells.set(k, []).get(k)).push(n);
+  }
+  for (const n of edge) {
+    const cx = Math.floor(x[n] / EDGE_JOIN_M), cy = Math.floor(y[n] / EDGE_JOIN_M);
+    for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) {
+      for (const m of cells.get(cellOf(cx + i, cy + j)) ?? []) {
+        if (m > n && hypot(x[m] - x[n], y[m] - y[n]) <= EDGE_JOIN_M) edges.push(n, m, 0);
       }
-      edges.push(u, v, nb);
     }
   }
   const walk = new Graph(x.length), bike = new Graph(x.length);
@@ -1051,30 +1250,38 @@ async function walkTracks(legs, crs, env) {
     30 < dist(l.pts[0].slice(1), l.pts[1].slice(1)) && dist(l.pts[0].slice(1), l.pts[1].slice(1)) < max;
   let walks = legs.filter(l => (isWalk(l.mode) && within(l, MAX_WALK_M)) || (isBike(l.mode) && !isWalk(l.mode) && within(l, MAX_BIKE_M)));
   if (!walks.length) return new Map();
+  const n = 2 ** PATH_Z, tileOf = (lon, lat) => [Math.floor((lon + 180) / 360 * n),
+    Math.floor((1 - Math.asinh(Math.tan(lat * Math.PI / 180)) / Math.PI) / 2 * n)];
   const need = [], count = new Map();  // tiles each walk needs: those of its bounding box
   for (const leg of walks) {
-    const [lon0, lat0] = crs.toWgs(leg.pts[0].slice(1)), [lon1, lat1] = crs.toWgs(leg.pts[1].slice(1));
-    const [i0, i1] = [Math.floor(lat0 / WALK_TILE), Math.floor(lat1 / WALK_TILE)].sort((a, b) => a - b);
-    const [j0, j1] = [Math.floor(lon0 / WALK_TILE), Math.floor(lon1 / WALK_TILE)].sort((a, b) => a - b);
+    // with WALK_SNAP_M around: a start near a tile edge may snap to a path across it
+    const [ax, ay] = leg.pts[0].slice(1), [bx, by] = leg.pts[1].slice(1), m = WALK_SNAP_M;
+    const [x0, y0] = tileOf(...crs.toWgs([Math.min(ax, bx) - m, Math.max(ay, by) + m])),
+      [x1, y1] = tileOf(...crs.toWgs([Math.max(ax, bx) + m, Math.min(ay, by) - m]));
     const t = [];
-    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) t.push(`${i}_${j}`);
+    for (let i = Math.min(x0, x1); i <= Math.max(x0, x1); i++) for (let j = Math.min(y0, y1); j <= Math.max(y0, y1); j++) t.push(`${i}_${j}`);
     need.push(t);
     for (const k of t) count.set(k, (count.get(k) ?? 0) + 1);
   }
-  const chosen = countTop(count, MAX_WALK_TILES).map(k => k.split("_").map(Number))
+  const chosen = countTop(count, MAX_PATH_TILES).map(k => k.split("_").map(Number))
     .sort((p, q) => p[0] - q[0] || p[1] - q[1]);
-  if (count.size > MAX_WALK_TILES) env.say(`note: the walks cover ${count.size} map tiles; the ${MAX_WALK_TILES} ` +
+  if (count.size > MAX_PATH_TILES) env.say(`note: the walks cover ${count.size} map tiles; the ${MAX_PATH_TILES} ` +
     "with most walks and rides get paths, the others stay straight");
   const tiles = [], loaded = new Set();
-  for (let n = 0; n < chosen.length; n++) {
-    const [i, j] = chosen[n];
-    env.progress({ step: `Footpaths: tile ${n + 1} of ${chosen.length}` });
-    const tile = await walkTile(i, j, env);
-    if (!tile) { env.say("note: walks and rides where footpaths are missing stay straight"); break; }
-    tiles.push(tile); loaded.add(`${i}_${j}`);
-  }
+  let next = 0, got = 0;
+  const worker = async () => {
+    while (next < chosen.length) {
+      const [i, j] = chosen[next++];
+      const tile = await pathTile(i, j, env);
+      env.progress({ step: `Footpaths: tile ${++got} of ${chosen.length}`, fraction: got / chosen.length });
+      if (tile) { tiles.push([i, j, tile]); loaded.add(`${i}_${j}`); }
+    }
+  };
+  await Promise.all(Array.from({ length: PATH_FETCHES }, worker));
+  if (loaded.size < chosen.length) env.say("note: walks and rides where footpaths are missing stay straight");
   walks = walks.filter((_, k) => need[k].every(t => loaded.has(t)));
   if (!tiles.length || !walks.length) return new Map();
+  tiles.sort((p, q) => p[0] - q[0] || p[1] - q[1]);  // as chosen, whatever order they came in
   env.progress({ step: "Routing walks and bikes on the footpaths" });
   const { walk, bike, X, Y, index } = walkGraph(tiles, crs);
   // cost in metres; give up on long detours (e.g. a start snapped to the wrong side of a river)
