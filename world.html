@@ -1129,7 +1129,7 @@ function covRecentre(tx, ty) {
   const r = tileRect(NEAR_Z, covOX, covOY);
   covU.covRect.value.set(r.X0, r.Z0, r.S * COV_N, r.S * COV_N);
   covData.fill(0);
-  for (const t of tiles.values()) if (t.z === NEAR_Z && t.group) covMark(t, 255);
+  for (const t of tiles.values()) if (t.z === NEAR_Z && t.group && !t.hidden) covMark(t, 255);
 }
 function covMark(t, v) {
   const i = t.x - covOX, j = t.y - covOY;
@@ -1153,7 +1153,7 @@ function attr(g, name, arr, size) {  // byte normals and colours (from the worke
 let failedTiles = 0;
 function onTile(t, d, level) {
   t.pending = null;
-  if (!tiles.has(t.key)) { d.texture?.close?.(); return; }
+  if (tiles.get(t.key) !== t) { d.texture?.close?.(); return; }  // dropped meanwhile (maybe wanted again since)
   if (d.error) { t.failed = (t.failed || 0) + 1; console.warn(`a map tile failed (${++failedTiles} so far):`, d.error); return; }
   const r = tileRect(t.z, t.x, t.y);
   const group = new THREE.Group(); group.position.set(r.X0, 0, r.Z0);
@@ -1191,7 +1191,8 @@ function onTile(t, d, level) {
   t.group = group; t.level = level; t.N = d.N; t.h = d.heights; t.S = r.S; t.X0 = r.X0; t.Z0 = r.Z0;
   t.deckH = d.deckH || null; t.deckD = d.deckD || null;
   scene.add(group);
-  if (t.z === NEAR_Z) covMark(t, 255);
+  group.visible = !t.hidden;
+  if (t.z === NEAR_Z && !t.hidden) covMark(t, 255);
 }
 canvas.addEventListener('webglcontextrestored', () => {
   for (const t of tiles.values()) { disposeGroup(t.group); t.group = null; t.level = null; }
@@ -1208,6 +1209,15 @@ function disposeGroup(g) {
   });
 }
 
+// tiles kept out of range, per zoom: a full near tile takes about 30 MB of GPU memory, a far one about 2 MB.
+// Safari and Firefox don't tell the memory: they get a middle budget (Safari reloads a tab that takes too much).
+const KEEP = { [NEAR_Z]: LOW_MEMORY ? 6 : navigator.deviceMemory ? 40 : 16, [FAR_Z]: 60 };
+const R_SHOW = LOW_MEMORY ? R_LITE : 8000;  // kept near tiles are drawn up to this far from the focus
+function showTile(t, on) {
+  t.hidden = !on;
+  if (t.group) t.group.visible = on;
+  if (t.z === NEAR_Z && t.group) covMark(t, on ? 255 : 0);
+}
 function updateTiles(fx, fz) {
   if (!tileTemplate) return;
   const [cx, cy] = tileAt(NEAR_Z, fx, fz);
@@ -1229,14 +1239,29 @@ function updateTiles(fx, fz) {
     let t = tiles.get(key);
     if (!t) { t = { key, z: w.z, x: w.x, y: w.y, group: null, level: null, pending: null }; tiles.set(key, t); }
     t.d = w.d;
-    // upgrade to full when close; keep full detail until it is well out of range
-    t.want = w.level === 'lite' && t.level === 'full' && w.d < R_FULL * 1.5 ? 'full' : w.level;
+    // upgrade to full when close; a tile once built in full detail stays so
+    t.want = t.level === 'full' ? 'full' : w.level;
+    if (t.hidden !== false) showTile(t, true);
+    if (t.group) for (const m of t.group.children) if (m.isInstancedMesh) m.visible = true;
   }
+  // Tiles out of range are kept, not dropped, so coming back shows them at once. Near tiles stay drawn up to
+  // R_SHOW, for detail towards the horizon, and are hidden beyond. Past KEEP kept tiles of a zoom, the
+  // farthest are dropped.
+  const kept = { [NEAR_Z]: [], [FAR_Z]: [] };
   for (const [key, t] of tiles) {
     if (wanted.has(key)) continue;
-    const r = tileRect(t.z, t.x, t.y), d = Math.hypot(r.X0 + r.S / 2 - fx, r.Z0 + r.S / 2 - fz);
-    if (d < (t.z === NEAR_Z ? R_LITE * 1.3 + r.S : R_FAR * 1.2)) continue;
-    disposeGroup(t.group); if (t.z === NEAR_Z) covMark(t, 0); tiles.delete(key);
+    t.want = null;
+    if (!t.group && !t.pending) { tiles.delete(key); continue; }
+    const r = tileRect(t.z, t.x, t.y), d = Math.hypot(Math.max(r.X0 - fx, 0, fx - r.X0 - r.S), Math.max(r.Z0 - fz, 0, fz - r.Z0 - r.S));
+    t.d = d;
+    const show = t.z === NEAR_Z && d < R_SHOW;
+    if (t.hidden === show) showTile(t, show);
+    if (t.group) for (const m of t.group.children) if (m.isInstancedMesh) m.visible = d < R_LITE;  // trees: under a pixel past R_LITE
+    kept[t.z].push(t);
+  }
+  for (const z of [NEAR_Z, FAR_Z]) {
+    const list = kept[z].sort((a, b) => a.d - b.d);  // the farthest go first
+    for (const t of list.slice(KEEP[z])) { if (z === NEAR_Z) covMark(t, 0); disposeGroup(t.group); t.group = null; tiles.delete(t.key); }
   }
   const queue = [...tiles.values()].filter(t => !t.pending && t.want && t.want !== t.level && (t.failed || 0) < 3)
     .sort((a, b) => (a.z === NEAR_Z ? a.d : a.d * 0.35 + 600) - (b.z === NEAR_Z ? b.d : b.d * 0.35 + 600));

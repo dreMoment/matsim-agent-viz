@@ -1,6 +1,6 @@
 // Downloads the OpenStreetMap tiles of tools/osm-regions.json from Overpass, with the engine's own queries,
-// and writes them as gzipped JSON to osm/{rail,walk}/KEY.json.gz. The site publishes that folder, so builds
-// in these regions take their tracks and footpaths from the site instead of waiting for Overpass
+// and writes them as gzipped JSON to osm/rail/KEY.json.gz. The site publishes that folder, so builds
+// in these regions take their tracks from the site instead of waiting for Overpass
 // (js/worker.js, `shared`). Public OSM data only: no run is read.
 //
 //   node tools/osm-tiles.mjs [--out osm] [--regions tools/osm-regions.json] [--max-age-days 6] [--budget-min 0]
@@ -17,7 +17,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
-import { railTile, walkTile, railQuery, walkQuery, WALK_TILE } from "../js/engine.js";
+import { railTile, railQuery } from "../js/engine.js";
 
 const args = process.argv.slice(2);
 const arg = (name, def) => { const i = args.indexOf(name); return i >= 0 ? args[i + 1] : def; };
@@ -54,18 +54,18 @@ const markChanged = async () => {
 
 // Which tiles the regions need, and the engine's query for each.
 const range = (a, b) => Array.from({ length: b - a + 1 }, (_, k) => a + k);
-const tiles = { rail: new Map(), walk: new Map() };
+const tiles = { rail: new Map() };
 const regions = JSON.parse(await fs.readFile(REGIONS, "utf8"));
 for (const [s, w, n, e] of Object.values(regions.rail ?? {}))
   for (const lat of range(Math.floor(s), Math.floor(n)))
     for (const lon of range(Math.floor(w), Math.floor(e))) tiles.rail.set(`${lat}_${lon}`, railQuery(lat, lon));
-for (const [s, w, n, e] of Object.values(regions.walk ?? {}))
-  for (const i of range(Math.floor(s / WALK_TILE), Math.floor(n / WALK_TILE)))
-    for (const j of range(Math.floor(w / WALK_TILE), Math.floor(e / WALK_TILE))) tiles.walk.set(`${i}_${j}`, walkQuery(i, j));
 
 // Remove tiles outside the regions and files left by an interrupted run.
 await fs.rm(`${MANIFEST}.tmp`, { force: true });
-for (const kind of ["rail", "walk"]) {
+for (const d of await fs.readdir(OUT, { withFileTypes: true }).catch(() => [])) {  // a kind no longer published
+  if (d.isDirectory() && !Object.hasOwn(tiles, d.name)) { await fs.rm(path.join(OUT, d.name), { recursive: true, force: true }); await markChanged(); }
+}
+for (const kind of Object.keys(tiles)) {
   for (const name of await fs.readdir(path.join(OUT, kind)).catch(() => [])) {
     const key = name.endsWith(".json.gz") ? name.slice(0, -".json.gz".length) : null;
     if (key && tiles[kind].has(key)) continue;
@@ -101,7 +101,7 @@ const store = {
 // Overpass refuses Node's default User-Agent.
 const fetchWithAgent = (url, init = {}) => fetch(url, { ...init, headers: { ...init.headers, "User-Agent": "matsim-agent-viz" } });
 const env = { cache: store, fetch: fetchWithAgent, say: text => console.log(text) };
-const load = { rail: (lat, lon) => railTile(lat, lon, env), walk: (i, j) => walkTile(i, j, env) };
+const load = { rail: (lat, lon) => railTile(lat, lon, env) };
 
 // A tile from an older query is removed when no new one replaces it: the page then asks Overpass, rather than
 // reading data the engine no longer expects. A tile that is only old stays.
@@ -115,7 +115,7 @@ const dropOld = async (kind, key) => {
 
 const start = Date.now();
 let kept = 0, fetched = 0, failed = 0, skipped = 0;
-for (const kind of ["rail", "walk"]) {
+for (const kind of Object.keys(tiles)) {
   for (const [key, query] of tiles[kind]) {
     if (await fresh(kind, key, query)) { kept++; continue; }
     if (BUDGET_MS && Date.now() - start > BUDGET_MS) {
@@ -132,7 +132,7 @@ for (const kind of ["rail", "walk"]) {
     await new Promise(r => setTimeout(r, 2000));  // be gentle with the public Overpass server
   }
 }
-console.log(`${tiles.rail.size} rail and ${tiles.walk.size} footpath tiles: ${kept} kept, ${fetched} downloaded, ` +
+console.log(`${tiles.rail.size} rail tiles: ${kept} kept, ${fetched} downloaded, ` +
   `${failed} failed, ${skipped} left for the next run (time budget)`);
 if ((failed || skipped) && process.env.GITHUB_ACTIONS)
   console.log(`::warning::${failed} OpenStreetMap tiles failed to download and ${skipped} were left for the next run; the site keeps an old tile, or asks Overpass where there is none or its query changed`);
